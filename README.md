@@ -21,3 +21,6 @@ Contribution Disclaimer: The author welcomes any form of contribution, but shall
 
 # License
 This project is licensed under the BSD 3-clause License. See the LICENSE file for more details.
+
+# Note: 
+Contain codes written with the assistance of LLM (such as GPT) assistants
