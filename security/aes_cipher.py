@@ -24,6 +24,7 @@ class AESCipher:
     #This size determines the maximum amount of plaintext data that might be exposed in the output in case of an exception during encryption or decryption processes. 
     #Larger buffer sizes increase efficiency but also increase the maximum potential exposure of plaintext in case of errors.
     DEFAULT_BUFFER_SIZE = 16 * 1024 * 1024
+    #DEFAULT_BUFFER_SIZE = 16
 
     def __init__(self, key=None, password=None):
         """
@@ -50,18 +51,23 @@ class AESCipher:
             with open(input_file_path, 'rb') as infile:
                 cipher = AES.new(self.key, AES.MODE_CBC)  # Create a new cipher object
                 iv = cipher.iv  # Initialization vector
-
                 with open(output_file_path, 'wb') as outfile:
                     outfile.write(iv)  # Write the IV to the output file
                     while True:
-                        data = infile.read(self.DEFAULT_BUFFER_SIZE)
-                        if len(data) == 0:
+                        block = infile.read(self.DEFAULT_BUFFER_SIZE)
+                        if len(block) == 0: # the end
+                            block = pad(b'', AES.block_size)
+                            outfile.write(cipher.encrypt(block))
                             break
-                        encrypted_data = cipher.encrypt(pad(data, AES.block_size))
-                        outfile.write(encrypted_data)
+                        if len(block) < self.DEFAULT_BUFFER_SIZE: # the last block
+                            block = pad(block, AES.block_size)
+                            outfile.write(cipher.encrypt(block))
+                            break
+                        else:
+                            outfile.write(cipher.encrypt(block))
         except Exception as e:
             logging.error(f"Error in encrypt_file_to_file: {e}")
-            raise  # Re-raise the exception
+            raise
 
     def decrypt_file_to_file(self, input_file_path, output_file_path):
         """
@@ -76,19 +82,20 @@ class AESCipher:
                 cipher = AES.new(self.key, AES.MODE_CBC, iv)  # Create a new cipher object
 
                 with open(output_file_path, 'wb') as outfile:
+                    data = b''
                     while True:
-                        data = infile.read(self.DEFAULT_BUFFER_SIZE)
-                        if len(data) == 0:
+                        block = infile.read(self.DEFAULT_BUFFER_SIZE)
+                        if len(block) == 0:
                             break
-                        decrypted_data = cipher.decrypt(data)
-                        try:
-                            outfile.write(unpad(decrypted_data, AES.block_size))
-                        except ValueError:
-                            logging.error("Padding error in decrypt_file_to_file")
-                            break
+                        data += cipher.decrypt(block)
+
+                    # Remove padding and write final data
+                    decrypted_data = unpad(data, AES.block_size)
+                    outfile.write(decrypted_data)
+
         except Exception as e:
             logging.error(f"Error in decrypt_file_to_file: {e}")
-            raise  # Re-raise the exception
+            raise
 
     def decrypt_file_to_memory(self, input_file_path, use_disk_buffer=False):
         """
@@ -110,16 +117,17 @@ class AESCipher:
                 with open(input_file_path, 'rb') as infile:
                     iv = infile.read(16)
                     cipher = AES.new(self.key, AES.MODE_CBC, iv)
+
+                    data = b''
                     while True:
-                        data = infile.read(self.DEFAULT_BUFFER_SIZE)
-                        if len(data) == 0:
+                        block = infile.read(self.DEFAULT_BUFFER_SIZE)
+                        if len(block) == 0:
                             break
-                        decrypted_data = cipher.decrypt(data)
-                        try:
-                            decrypted_stream.write(unpad(decrypted_data, AES.block_size))
-                        except ValueError:
-                            logging.error("Padding error in decrypt_file_to_memory without disk buffer")
-                            break
+                        data += cipher.decrypt(block)
+
+                    # Remove padding and write final data
+                    decrypted_data = unpad(data, AES.block_size)
+                    decrypted_stream.write(decrypted_data)
 
             decrypted_stream.seek(0)
             return decrypted_stream

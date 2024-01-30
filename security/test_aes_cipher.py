@@ -10,7 +10,7 @@ class TestAESCipher(unittest.TestCase):
         self.cipher = AESCipher(password=self.password)
 
         # Create a temporary file with test data
-        self.test_data = b"This is some test data for AES encryption."
+        self.test_data = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbbbbbbbbbbbbbbbbbbbb\ncccccccccccccccccccc\nddddddddddddddddddddddddddddddddddddddd\n"
         self.input_file = tempfile.NamedTemporaryFile(delete=False)
         self.input_file.write(self.test_data)
         self.input_file.close()
