@@ -9,7 +9,9 @@ Under development, not yet released!
 
 # Features
 
-1. Encryption and Security: Unique utilities for encrypting data and models, ensuring secure model training and deployment in sensitive applications.
+0. Utility: A Comprehensive Toolkit for Developers,  includes Advanced Data Operations,... etc.
+
+1. Security: Unique utilities for encrypting data and models, ensuring secure model training and deployment in sensitive applications.
 
 
 
