@@ -26,6 +26,9 @@ class AESCipher:
     DEFAULT_BUFFER_SIZE = 16 * 1024 * 1024
     #DEFAULT_BUFFER_SIZE = 16
 
+    # Define a unique signature to identify the encrypted data
+    SIGNATURE = b'myAESCipher'
+
     def __init__(self, key=None, password=None):
         """
         Initialize the AES Cipher with either a key or a password.
@@ -134,3 +137,39 @@ class AESCipher:
         except Exception as e:
             logging.error(f"Error in decrypt_file_to_memory: {e}")
             raise  # Re-raise the exception
+
+
+    def encrypt_bytes(self, data):
+        """
+        Encrypts a data segment using AES encryption with a new IV for each encryption.
+        Prepends the unique signature and IV to the encrypted data. 
+        Handles exceptions during encryption.
+        """
+        try:
+            cipher = AES.new(self.key, AES.MODE_CBC)
+            iv = cipher.iv
+            encrypted_data = cipher.encrypt(pad(data, AES.block_size))
+            return self.SIGNATURE + iv + encrypted_data
+        except Exception as e:
+            logging.error(f"Error in encrypt_bytes: Encryption failed: {e}")
+            raise  # Re-raise the current exception
+
+    def decrypt_bytes(self, encrypted_data):
+        """
+        Decrypts a data segment that was encrypted with AES encryption by this class.
+
+        Handles errors during decryption, such as incorrect padding or corrupted data.
+        """
+        try:
+            if encrypted_data.startswith(self.SIGNATURE):
+                signature_len = len(self.SIGNATURE)
+                iv = encrypted_data[signature_len:signature_len+16]
+                encrypted_data_without_iv = encrypted_data[signature_len+16:]
+                cipher = AES.new(self.key, AES.MODE_CBC, iv)
+                decrypted_data = unpad(cipher.decrypt(encrypted_data_without_iv), AES.block_size)
+                return decrypted_data
+            else:
+                return encrypted_data
+        except Exception as e:
+            logging.error(f"Error in decrypt_bytes: Decryption failed: {e}")
+            raise  # Re-raise the current exception
