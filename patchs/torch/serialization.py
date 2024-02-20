@@ -6,8 +6,8 @@ from typing import Dict
 
 
 __all__ = [
-    '_save_with_encryption',
-    '_load_with_decryption'
+    'enable_encryption_patch',
+    'disable_encryption_patch'
 ]
 
 def _save_with_encryption(obj, zip_file, pickle_module, pickle_protocol, _disable_byteorder_record):
@@ -66,7 +66,7 @@ def _save_with_encryption(obj, zip_file, pickle_module, pickle_protocol, _disabl
             else:
                 storage = obj
                 storage_dtype = torch.uint8
-                storage_type = normalize_storage_type(type(obj))
+                storage_type = torch.serialization.normalize_storage_type(type(obj))
                 storage_numel = storage.nbytes()
 
             # If storage is allocated, ensure that any other saved storages
@@ -82,7 +82,7 @@ def _save_with_encryption(obj, zip_file, pickle_module, pickle_protocol, _disabl
                     storage_dtypes[storage.data_ptr()] = storage_dtype
 
             storage_key = id_map.setdefault(storage._cdata, str(len(id_map)))
-            location = location_tag(storage)
+            location = torch.serialization.location_tag(storage)
             serialized_storages[storage_key] = storage
 
             return ('storage',
@@ -151,7 +151,7 @@ def _load_with_decryption(zip_file, map_location, pickle_module, pickle_file='da
     See Also:
         `torch.load`: The public API function that utilizes this function for loading objects with decryption.
     """
-    restore_location = _get_restore_location(map_location)
+    restore_location = torch.serialization._get_restore_location(map_location)
 
     loaded_storages = {}
 
@@ -162,18 +162,18 @@ def _load_with_decryption(zip_file, map_location, pickle_module, pickle_file='da
         byteorderdata = zip_file.get_record(byteordername)
         if byteorderdata not in [b'little', b'big']:
             raise ValueError('Unknown endianness type: ' + byteorderdata.decode())
-    elif get_default_load_endianness() == LoadEndianness.LITTLE or \
-            get_default_load_endianness() is None:
+    elif torch.serialization.get_default_load_endianness() == LoadEndianness.LITTLE or \
+            torch.serialization.get_default_load_endianness() is None:
         byteorderdata = b'little'
-    elif get_default_load_endianness() == LoadEndianness.BIG:
+    elif torch.serialization.get_default_load_endianness() == LoadEndianness.BIG:
         byteorderdata = b'big'
-    elif get_default_load_endianness() == LoadEndianness.NATIVE:
+    elif torch.serialization.get_default_load_endianness() == LoadEndianness.NATIVE:
         pass
     else:
         raise ValueError('Invalid load endianness type')
 
     if not zip_file.has_record(byteordername) and \
-            get_default_load_endianness() is None and \
+            torch.serialization.get_default_load_endianness() is None and \
             sys.byteorder == 'big':
         # Default behaviour was changed
         # See https://github.com/pytorch/pytorch/issues/101688
@@ -210,7 +210,7 @@ def _load_with_decryption(zip_file, map_location, pickle_module, pickle_file='da
 
     def persistent_load(saved_id):
         assert isinstance(saved_id, tuple)
-        typename = _maybe_decode_ascii(saved_id[0])
+        typename = torch.serialization._maybe_decode_ascii(saved_id[0])
         data = saved_id[1:]
 
         assert typename == 'storage', \
@@ -262,3 +262,28 @@ def _load_with_decryption(zip_file, map_location, pickle_module, pickle_file='da
         "torch.load.metadata", {"serialization_id": zip_file.serialization_id()}
     )
     return result
+
+# Back up the original torch.serialization._save and _load functions
+original_torch__save = torch.serialization._save
+original_torch__load = torch.serialization._load
+
+def enable_encryption_patch():
+    """
+    Apply Monkey Patching to replace the torch.serialization._save and _load
+    functions with custom encryption and decryption functions.
+    This enables encryption for torch.save and decryption for torch.load operations.
+    """
+    torch.serialization._save = _save_with_encryption
+    torch.serialization._load = _load_with_decryption
+    print("Encryption patch enabled.")
+
+def disable_encryption_patch():
+    """
+    Revoke Monkey Patching by restoring the torch.serialization._save and _load
+    functions to their original implementations.
+    This disables encryption for torch.save and decryption for torch.load, 
+    making them behave as per the default PyTorch functionality.
+    """
+    torch.serialization._save = original_torch__save
+    torch.serialization._load = original_torch__load
+    print("Encryption patch disabled.")
