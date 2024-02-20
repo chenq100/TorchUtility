@@ -144,6 +144,9 @@ class AESCipher:
         Encrypts a data segment using AES encryption with a new IV for each encryption.
         Prepends the unique signature and IV to the encrypted data. 
         Handles exceptions during encryption.
+
+        This method is thread-safe, as it only accesses immutable instance variables
+            and uses local variables within the method scope.
         """
         try:
             cipher = AES.new(self.key, AES.MODE_CBC)
@@ -157,8 +160,10 @@ class AESCipher:
     def decrypt_bytes(self, encrypted_data):
         """
         Decrypts a data segment that was encrypted with AES encryption by this class.
-
         Handles errors during decryption, such as incorrect padding or corrupted data.
+
+        This method is thread-safe, as it only accesses immutable instance variables
+            and uses local variables within the method scope.
         """
         try:
             if encrypted_data.startswith(self.SIGNATURE):

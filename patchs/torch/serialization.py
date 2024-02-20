@@ -3,6 +3,7 @@ import sys
 import torch
 import warnings
 from typing import Dict
+from security.aes_cipher import AESCipher
 
 
 __all__ = [
@@ -99,6 +100,11 @@ def _save_with_encryption(obj, zip_file, pickle_module, pickle_protocol, _disabl
     pickler.persistent_id = persistent_id
     pickler.dump(obj)
     data_value = data_buf.getvalue()
+    
+    if global_aes_cipher is not None:
+        # Encrypt the serialized data using the global encryption object
+        data_value = global_aes_cipher.encrypt_bytes(data_value)
+
     zip_file.write_record('data.pkl', data_value, len(data_value))
 
     # Write byte order marker
@@ -225,7 +231,7 @@ def _load_with_decryption(zip_file, map_location, pickle_module, pickle_file='da
             typed_storage = loaded_storages[key]
         else:
             nbytes = numel * torch._utils._element_size(dtype)
-            typed_storage = load_tensor(dtype, nbytes, key, _maybe_decode_ascii(location))
+            typed_storage = load_tensor(dtype, nbytes, key, torch.serialization._maybe_decode_ascii(location))
 
         return typed_storage
 
@@ -244,14 +250,19 @@ def _load_with_decryption(zip_file, map_location, pickle_module, pickle_file='da
         def find_class(self, mod_name, name):
             if type(name) is str and 'Storage' in name:
                 try:
-                    return StorageType(name)
+                    return torch.serialization.StorageType(name)
                 except KeyError:
                     pass
             mod_name = load_module_mapping.get(mod_name, mod_name)
             return super().find_class(mod_name, name)
 
     # Load the data (which may in turn use `persistent_load` to load tensors)
-    data_file = io.BytesIO(zip_file.get_record(pickle_file))
+    raw_data = zip_file.get_record(pickle_file)
+    if global_aes_cipher is not None:
+        # Decrypt the raw data using the global encryption object
+        raw_data = global_aes_cipher.decrypt_bytes(raw_data)
+
+    data_file = io.BytesIO(raw_data)
 
     unpickler = UnpicklerWrapper(data_file, **pickle_load_args)
     unpickler.persistent_load = persistent_load
@@ -267,12 +278,19 @@ def _load_with_decryption(zip_file, map_location, pickle_module, pickle_file='da
 original_torch__save = torch.serialization._save
 original_torch__load = torch.serialization._load
 
-def enable_encryption_patch():
+# global_aes_cipher is intended for multi-threaded use and is thread-safe,
+# The AESCipher instance methods operate solely on input parameters without shared mutable state.
+global_aes_cipher = None
+
+
+def enable_encryption_patch(password):
     """
     Apply Monkey Patching to replace the torch.serialization._save and _load
     functions with custom encryption and decryption functions.
     This enables encryption for torch.save and decryption for torch.load operations.
     """
+    global global_aes_cipher
+    global_aes_cipher = AESCipher(password=password)
     torch.serialization._save = _save_with_encryption
     torch.serialization._load = _load_with_decryption
     print("Encryption patch enabled.")
