@@ -1,3 +1,4 @@
+# cython: language_level=3
 import io
 import sys
 import torch
@@ -168,12 +169,12 @@ def _load_with_decryption(zip_file, map_location, pickle_module, pickle_file='da
         byteorderdata = zip_file.get_record(byteordername)
         if byteorderdata not in [b'little', b'big']:
             raise ValueError('Unknown endianness type: ' + byteorderdata.decode())
-    elif torch.serialization.get_default_load_endianness() == LoadEndianness.LITTLE or \
+    elif torch.serialization.get_default_load_endianness() == torch.serialization.LoadEndianness.LITTLE or \
             torch.serialization.get_default_load_endianness() is None:
         byteorderdata = b'little'
-    elif torch.serialization.get_default_load_endianness() == LoadEndianness.BIG:
+    elif torch.serialization.get_default_load_endianness() == torch.serialization.LoadEndianness.BIG:
         byteorderdata = b'big'
-    elif torch.serialization.get_default_load_endianness() == LoadEndianness.NATIVE:
+    elif torch.serialization.get_default_load_endianness() == torch.serialization.LoadEndianness.NATIVE:
         pass
     else:
         raise ValueError('Invalid load endianness type')
