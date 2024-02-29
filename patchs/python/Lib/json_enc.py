@@ -5,8 +5,8 @@ import base64
 from security.aes_cipher import AESCipher
 
 __all__ = [
-    'enable_encryption_patch',
-    'disable_encryption_patch'
+    'enable_json_encryption_patch',
+    'disable_json_encryption_patch'
 ]
 
 
