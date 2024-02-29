@@ -22,7 +22,7 @@ def _json_dumps_with_encryption(obj, *, skipkeys=False, ensure_ascii=True, check
     encrypted_str = base64.b64encode(encrypted_data).decode()
 
     # Append the encryption marker to the encrypted string
-    marked_encrypted_str = "myQESCipher:" + encrypted_str
+    marked_encrypted_str = "myAESCipher:" + encrypted_str
     return marked_encrypted_str
 
 def _json_loads_with_decryption(s, *, cls=None, object_hook=None, parse_float=None, parse_int=None, parse_constant=None, object_pairs_hook=None, **kw):
@@ -31,9 +31,9 @@ def _json_loads_with_decryption(s, *, cls=None, object_hook=None, parse_float=No
     Interface adapted for Python 3.8 through 3.13 compatibility.
     """
     # Check if the data is marked as encrypted
-    if s.startswith("myQESCipher:"):
+    if s.startswith("myAESCipher:"):
         # Correctly remove the encryption marker before decoding
-        encrypted_data_b64 = s[len("myQESCipher:"):]
+        encrypted_data_b64 = s[len("myAESCipher:"):]
         encrypted_data = base64.b64decode(encrypted_data_b64)
         decrypted_data = global_aes_cipher.decrypt_bytes(encrypted_data)
         decrypted_str = decrypted_data.decode() # Decode binary data back to string, using UTF-8 encoding by default
