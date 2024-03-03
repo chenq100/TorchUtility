@@ -15,8 +15,8 @@ Under development, not yet released!
 
 2. llm_lighting: A streamlined module dedicated to simplifying the complexities of Large Language Model (LLM) integration, focusing on efficient training, fine-tuning, and inference with minimal code. 
     This component utilizes a one-file approach for core functionalities, enhancing the project's utility with lightweight processes and seamless interaction with leading open-source libraries like Hugging Face.
-    causal_lm_lora_train.py: 
-    causal_lm_lora_inference.py: This script offers a straightforward and minimalistic approach to performing inference with LoRA-optimized Causal Language Models, ensuring high efficiency with lean code.
+    causallm_lora_train.py: 
+    causallm_lora_inference.py: This script offers a straightforward and minimalistic approach to performing inference with LoRA-optimized Causal Language Models, ensuring high efficiency with lean code.
 
 
 
