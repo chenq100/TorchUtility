@@ -1,6 +1,9 @@
 pycryptodome
 pyzipper
 Cython
+
 torch==2.2
 torchvision
 torchaudio
+
+peft

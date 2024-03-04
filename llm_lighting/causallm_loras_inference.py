@@ -10,7 +10,8 @@ from transformers import (
                           #     when created with the AutoTokenizer.from_pretrained() class method.
     )
 
-from peft import LoraConfig # class LoraConfig(PeftConfig): Reference: peft/src/peft/tuners/lora/config.py
+from peft import (
+        LoraConfig,         # class LoraConfig(PeftConfig): Reference: peft/src/peft/tuners/lora/config.py
                             # This is the configuration class to store the configuration of a [`LoraModel`], and inherits from PeftConfig,
                             #     r (`int`): Lora attention dimension (the "rank"). 
                             #     target_modules (`Optional[Union[List[str], str]]`): The names of the modules to apply the adapter to. 
@@ -31,7 +32,8 @@ from peft import LoraConfig # class LoraConfig(PeftConfig): Reference: peft/src/
                             #         LoftQ introduces a novel quantization framework tailored for LoRA fine-tuning, 
                             #         effectively bridging the gap between quantized and full-precision models by finding an optimal low-rank initialization, 
                             #         thereby significantly enhancing model generalization and performance on downstream tasks.
-
+        TaskType
+        )
 
 
 
@@ -47,12 +49,49 @@ lora_configs = {
 
 }
 
-class CausalLMLoRAsInference
+class CausalLMLoRAsInference:
     def __init__(self, model_path):
-        self.base_model = AutoModelForCausalLM.from_pretrained(model_path)
+        self.model = AutoModelForCausalLM.from_pretrained( # Reference: 
+                pretrained_model_name_or_path = model_path,
+                trust_remote_code = True,
+                )
+
+        self.tokenizer = AutoTokenizer.from_pretrained(         # Reference: src/transformers/models/auto/tokenization_auto.py
+                pretrained_model_name_or_path = model_path,     # A path to a *directory* containing vocabulary files required by the tokenizer.
+                #*inputs,                                       # one '*' used to collect all additional positional parameters, 
+                                                                #   will be passed along to the Tokenizer `__init__()` method.
+                #**kwargs                                       # two '**' used to collect all additional keyword arguments,
+                                                                #   will be passed to the Tokenizer `__init__()` method.
+                                                                ##### as listed below
+                                                                #     config ([`PretrainedConfig`], *optional*)
+                                                                #     cache_dir (`str` or `os.PathLike`, *optional*):
+                                                                #     force_download (`bool`, *optional*, defaults to `False`):
+                                                                #     resume_download (`bool`, *optional*, defaults to `False`):
+                                                                #     proxies (`Dict[str, str]`, *optional*):
+                                                                #     revision (`str`, *optional*, defaults to `"main"`):
+                                                                #     subfolder (`str`, *optional*):
+                                                                #     use_fast (`bool`, *optional*, defaults to `True`): Use a [fast Rust-based tokenizer] if it is supported
+                                                                #     tokenizer_type (`str`, *optional*):
+                                                                #     trust_remote_code (`bool`, *optional*, defaults to `False`): 
+                use_fast = False,
+                trust_remote_code = True,
+                )
+
+        self.tokenizer_type_name = self.tokenizer.__class__.__name__
+        print(f"tokenizer_class_name is:  {self.tokenizer_type_name}")
+
+        import types
+        from transformers import PreTrainedTokenizerBase        #
+        base_pad_method = getattr(PreTrainedTokenizerBase, '_pad')
+        tokenizer_pad_method = getattr(self.tokenizer.__class__, '_pad')
+        if tokenizer_pad_method is base_pad_method:
+            print(f"Derived classes [{self.tokenizer_type_name}] do not override PreTrainedTokenizerBase._pad")
+        else:
+            print(f"Derived classes [{self.tokenizer_type_name}] override PreTrainedTokenizerBase._pad")
+
         self.lora_name_dict = {}
     
-    def load_adapter(self, lora_path: str, lora_name: str, model_name: str) -> None:
+    def load_lora(self, lora_path: str, lora_name: str, model_name: str) -> None:
         """
         Args:
             lora_path (str):
@@ -68,7 +107,7 @@ class CausalLMLoRAsInference
             raise ValueError(f"The lora_name key '{lora_name}' already exists in the dictionary.")
         
         try:
-            self.base_model.load_adapter(
+            self.model.load_adapter(
                 # The identifier of the model to look for on the Hub, or a local path to the saved adapter config file and adapter weights.
                 peft_model_id = lora_path,
                 # The adapter name to use. If not set, will use the default adapter.
@@ -98,11 +137,30 @@ class CausalLMLoRAsInference
             print(f"Failed to load adapter {lora_name}---{lora_path}, {e}")
             raise
 
+    def generate(self, text: str) -> str:
+        inputs = self.tokenizer(text, return_tensors="pt")
+
+        outputs = self.model.generate(**inputs)
+
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        return response
 
  
 
 
 
 
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Run Causal LLM with LoRA Inference.")
+    parser.add_argument("--model_name", type=str, required=True, help="Name of the model to use.")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to the pre-trained model directory.")
+    parser.add_argument("--lora_path", type=str, required=True, help="Path to the LoRA parameters directory.")
+    parser.add_argument("--lora_name", type=str, required=True, help="Name of the LoRA parameters to load.")
+    parser.add_argument("--question", type=str, required=True, help="Question to ask.")
+    args = parser.parse_args()
 
-
+    clm = CausalLMLoRAsInference(args.model_path)
+    clm.load_lora(lora_path=args.lora_path, lora_name=args.lora_path, model_name=args.model_name)
+    print(clm.generate(args.question))
