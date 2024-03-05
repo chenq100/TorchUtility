@@ -1,13 +1,18 @@
 # cython: language_level=3
-
 ### Reference: https://huggingface.co/docs/transformers/main/peft
+
+import torch
 
 from transformers import (
     AutoModelForCausalLM, # A generic model class that will be instantiated as one of the model classes of the library (with a causal language modeling head) 
                           #     when created with the from_pretrained() class method or the from_config() class method.
 
-    AutoTokenizer         # A generic tokenizer class that will be instantiated as one of the tokenizer classes of the library 
+    AutoTokenizer,        # A generic tokenizer class that will be instantiated as one of the tokenizer classes of the library 
                           #     when created with the AutoTokenizer.from_pretrained() class method.
+                          #
+    BitsAndBytesConfig    # This is a wrapper class about all possible attributes and features
+                          #     that you can play with a model that has been loaded using bitsandbytes. 
+                          #
     )
 
 from peft import (
@@ -51,10 +56,63 @@ lora_configs = {
 
 class CausalLMLoRAsInference:
     def __init__(self, model_path):
-        self.model = AutoModelForCausalLM.from_pretrained( # Reference: 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+
+        bnb_config_nf4 = BitsAndBytesConfig(                  # https://huggingface.co/docs/transformers/main_classes/quantization#transformers.BitsAndBytesConfig
+                        load_in_4bit=True,                    # enable 4-bit quantization by replacing the Linear layers with FP4/NF4 layers from bitsandbytes
+                        bnb_4bit_quant_type="nf4",            # sets the quantization data type in the bnb.nn.Linear4Bit layers
+                        bnb_4bit_use_double_quant=True,       # used for nested quantization where the quantization constants from the first quantization are quantized again
+                        bnb_4bit_compute_dtype=torch.bfloat16 # sets the computational type which might be different than the input time
+                        )
+
+
+        # PreTrainedModel -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L1127
+        # _BaseAutoModelClass -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/models/auto/auto_factory.py#L400
+        #
+        #class AutoModelForCausalLM(_BaseAutoModelClass): 
+        #    _model_mapping = MODEL_FOR_CAUSAL_LM_MAPPING
+        #
+        # AutoModelForCausalLM.from_pretrained -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/models/auto/auto_factory.py#L443
+        # PreTrainedModel.from_pretrained -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L2579
+        self.model = AutoModelForCausalLM.from_pretrained(
+                # cls, 
                 pretrained_model_name_or_path = model_path,
+                # *model_args,                                one '*' used to collect all additional positional parameters
+                # **kwargs                                    two '**' used to collect all additional keyword arguments
+                #
+                # 
+                # state_dict = kwargs.pop("state_dict", None)
+                # from_tf = kwargs.pop("from_tf", False)
+                # from_flax = kwargs.pop("from_flax", False)
+                # resume_download = kwargs.pop("resume_download", False)
+                # proxies = kwargs.pop("proxies", None)
+                # output_loading_info = kwargs.pop("output_loading_info", False)
+                # use_auth_token = kwargs.pop("use_auth_token", None)
+                # trust_remote_code = kwargs.pop("trust_remote_code", None)
                 trust_remote_code = True,
+                # _ = kwargs.pop("mirror", None)
+                # from_pipeline = kwargs.pop("_from_pipeline", None)
+                # from_auto_class = kwargs.pop("_from_auto", False)
+                # _fast_init = kwargs.pop("_fast_init", True)
+                # torch_dtype = kwargs.pop("torch_dtype", None)
+                # low_cpu_mem_usage = kwargs.pop("low_cpu_mem_usage", None)
+                # device_map = kwargs.pop("device_map", None)
+                device_map="auto",
+                # max_memory = kwargs.pop("max_memory", None)
+                # offload_folder = kwargs.pop("offload_folder", None)
+                # offload_state_dict = kwargs.pop("offload_state_dict", False)
+                # load_in_8bit = kwargs.pop("load_in_8bit", False)
+                # load_in_4bit = kwargs.pop("load_in_4bit", False)              -> used to enable 4-bit quantization by replacing the Linear layers with FP4/NF4 layers from bitsandbytes
+                # quantization_config = kwargs.pop("quantization_config", None)
+                quantization_config = bnb_config_nf4,
+                # subfolder = kwargs.pop("subfolder", "")
+                # commit_hash = kwargs.pop("_commit_hash", None)
+                # variant = kwargs.pop("variant", None)
+                # adapter_kwargs = kwargs.pop("adapter_kwargs", {})
+                # adapter_name = kwargs.pop("adapter_name", "default")
+                # use_flash_attention_2 = kwargs.pop("use_flash_attention_2", False)
                 )
+        
 
         self.tokenizer = AutoTokenizer.from_pretrained(         # Reference: src/transformers/models/auto/tokenization_auto.py
                 pretrained_model_name_or_path = model_path,     # A path to a *directory* containing vocabulary files required by the tokenizer.
@@ -137,10 +195,12 @@ class CausalLMLoRAsInference:
             print(f"Failed to load adapter {lora_name}---{lora_path}, {e}")
             raise
 
-    def generate(self, text: str) -> str:
+    def generate(self, text: str, lora_name: str, max_generation_tokens: int):
         inputs = self.tokenizer(text, return_tensors="pt")
 
-        outputs = self.model.generate(**inputs)
+        dst_inputs = {key: value.to(self.device) for key, value in inputs.items()}
+
+        outputs = self.model.generate(**dst_inputs, max_new_tokens = max_generation_tokens)
 
         response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
@@ -158,9 +218,10 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, required=True, help="Path to the pre-trained model directory.")
     parser.add_argument("--lora_path", type=str, required=True, help="Path to the LoRA parameters directory.")
     parser.add_argument("--lora_name", type=str, required=True, help="Name of the LoRA parameters to load.")
+    parser.add_argument("--max_generation_tokens", type=int, required=True, help="Positive integer to control the maximum length of the generation")
     parser.add_argument("--question", type=str, required=True, help="Question to ask.")
     args = parser.parse_args()
 
     clm = CausalLMLoRAsInference(args.model_path)
-    clm.load_lora(lora_path=args.lora_path, lora_name=args.lora_path, model_name=args.model_name)
-    print(clm.generate(args.question))
+    clm.load_lora(lora_path=args.lora_path, lora_name=args.lora_name, model_name=args.model_name)
+    print(clm.generate(text = args.question, lora_name = args.lora_name, max_generation_tokens = args.max_generation_tokens))
