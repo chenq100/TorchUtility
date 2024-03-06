@@ -55,8 +55,8 @@ lora_configs = {
 }
 
 class CausalLMLoRAsInference:
-    def __init__(self, model_path):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+    def __init__(self, model_path, model_name):
+        self.model_name = model_name
 
         bnb_config_nf4 = BitsAndBytesConfig(                  # https://huggingface.co/docs/transformers/main_classes/quantization#transformers.BitsAndBytesConfig
                         load_in_4bit=True,                    # enable 4-bit quantization by replacing the Linear layers with FP4/NF4 layers from bitsandbytes
@@ -72,6 +72,7 @@ class CausalLMLoRAsInference:
         #class AutoModelForCausalLM(_BaseAutoModelClass): 
         #    _model_mapping = MODEL_FOR_CAUSAL_LM_MAPPING
         #
+        # class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMixin, PeftAdapterMixin):
         # AutoModelForCausalLM.from_pretrained -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/models/auto/auto_factory.py#L443
         # PreTrainedModel.from_pretrained -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L2579
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -165,7 +166,7 @@ class CausalLMLoRAsInference:
             raise ValueError(f"The lora_name key '{lora_name}' already exists in the dictionary.")
         
         try:
-            self.model.load_adapter(
+            self.model.load_adapter( # transformers/src/transformers/integrations/peft.py
                 # The identifier of the model to look for on the Hub, or a local path to the saved adapter config file and adapter weights.
                 peft_model_id = lora_path,
                 # The adapter name to use. If not set, will use the default adapter.
@@ -196,9 +197,19 @@ class CausalLMLoRAsInference:
             raise
 
     def generate(self, text: str, lora_name: str, max_generation_tokens: int):
+        if lora_name in self.lora_name_dict:
+            self.model.set_adapter( # Sets a specific adapter by forcing the model to use a that adapter and disable the other adapters.
+                adapter_name = lora_name # The name of the adapter to set. Can be also a list of strings to set multiple adapters.
+                )
+        else:
+            print(f"Adapter {lora_name} not found. Falling back to using the base model only.")
+            # Disable all adapters that are attached to the model. This leads to inferring with the base model only.
+            self.model.disable_adapters()
+
         inputs = self.tokenizer(text, return_tensors="pt")
 
-        dst_inputs = {key: value.to(self.device) for key, value in inputs.items()}
+        device = next(self.model.parameters()).device
+        dst_inputs = {key: value.to(device) for key, value in inputs.items()}
 
         outputs = self.model.generate(**dst_inputs, max_new_tokens = max_generation_tokens)
 
@@ -216,12 +227,27 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Causal LLM with LoRA Inference.")
     parser.add_argument("--model_name", type=str, required=True, help="Name of the model to use.")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the pre-trained model directory.")
-    parser.add_argument("--lora_path", type=str, required=True, help="Path to the LoRA parameters directory.")
-    parser.add_argument("--lora_name", type=str, required=True, help="Name of the LoRA parameters to load.")
+    parser.add_argument("--lora", action='append', required=True, help="LoRA parameters in 'name:path' format, can be used multiple times.")
     parser.add_argument("--max_generation_tokens", type=int, required=True, help="Positive integer to control the maximum length of the generation")
-    parser.add_argument("--question", type=str, required=True, help="Question to ask.")
-    args = parser.parse_args()
 
-    clm = CausalLMLoRAsInference(args.model_path)
-    clm.load_lora(lora_path=args.lora_path, lora_name=args.lora_name, model_name=args.model_name)
-    print(clm.generate(text = args.question, lora_name = args.lora_name, max_generation_tokens = args.max_generation_tokens))
+    args = parser.parse_args()
+    
+    clm = CausalLMLoRAsInference(args.model_path, args.model_name)
+
+    for lora_name_and_path in args.lora:
+        lora_name, lora_path = lora_name_and_path.split(":", 1)
+        clm.load_lora(lora_path = lora_path, lora_name = lora_name, model_name=args.model_name)
+
+    while True:
+        lora_name_input = input("Enter LoRA name (or type 'exit' to quit): ")
+        if lora_name_input.lower() == 'exit':
+            break
+        question_input = input(f"Enter your question to {lora_name_input}: ")
+
+        print("Generating response...")
+        response = clm.generate(
+            text = question_input,
+            lora_name = lora_name_input,
+            max_generation_tokens = args.max_generation_tokens
+            )
+        print(f"Generated response: {response}\n")
