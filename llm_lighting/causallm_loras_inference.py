@@ -4,15 +4,21 @@
 import torch
 
 from transformers import (
-    AutoModelForCausalLM, # A generic model class that will be instantiated as one of the model classes of the library (with a causal language modeling head) 
-                          #     when created with the from_pretrained() class method or the from_config() class method.
+    AutoModelForCausalLM,         # A generic model class that will be instantiated as one of the model classes of the library (with a causal language modeling head) 
+                                  #     when created with the from_pretrained() class method or the from_config() class method.
 
-    AutoTokenizer,        # A generic tokenizer class that will be instantiated as one of the tokenizer classes of the library 
-                          #     when created with the AutoTokenizer.from_pretrained() class method.
-                          #
-    BitsAndBytesConfig    # This is a wrapper class about all possible attributes and features
-                          #     that you can play with a model that has been loaded using bitsandbytes. 
-                          #
+    AutoTokenizer,                # A generic tokenizer class that will be instantiated as one of the tokenizer classes of the library 
+                                  #     when created with the AutoTokenizer.from_pretrained() class method.
+                                  #
+    BitsAndBytesConfig,           # This is a wrapper class about all possible attributes and features
+                                  #     that you can play with a model that has been loaded using bitsandbytes. 
+                                  #
+    LogitsProcessorList,          # transformers/src/transformers/generation/logits_process.py
+                                  #   Create a list of [`LogitsProcessor`] or [`LogitsWarper`] to subsequently process a `scores` input tensor,
+                                  #     the 'scores' tensor represents the model's output predictions for each possible next token, based on the input sequence,
+                                  #     these scores are used to determine the likelihood of each token being the next in the generated sequence.
+    InfNanRemoveLogitsProcessor,  # ...
+
     )
 
 from peft import (
@@ -149,6 +155,8 @@ class CausalLMLoRAsInference:
             print(f"Derived classes [{self.tokenizer_type_name}] override PreTrainedTokenizerBase._pad")
 
         self.lora_name_dict = {}
+
+        self.default_logits_processor = LogitsProcessorList().append(InfNanRemoveLogitsProcessor())
     
     def load_lora(self, lora_path: str, lora_name: str, model_name: str) -> None:
         """
@@ -196,7 +204,10 @@ class CausalLMLoRAsInference:
             print(f"Failed to load adapter {lora_name}---{lora_path}, {e}")
             raise
 
-    def generate(self, text: str, lora_name: str, max_generation_tokens: int):
+    @torch.inference_mode()
+    def generate(self, text: str, lora_name: str, max_generation_tokens: int, 
+                    logits_processor: LogitsProcessorList  = None,
+            ):
         if lora_name in self.lora_name_dict:
             self.model.set_adapter( # Sets a specific adapter by forcing the model to use a that adapter and disable the other adapters.
                 adapter_name = lora_name # The name of the adapter to set. Can be also a list of strings to set multiple adapters.
@@ -206,18 +217,38 @@ class CausalLMLoRAsInference:
             # Disable all adapters that are attached to the model. This leads to inferring with the base model only.
             self.model.disable_adapters()
 
+        # the return inputs is a dict like: {'input_ids': tensor([[64790, 64792, 24954]]), 
+        #                                    'attention_mask': tensor([[1, 1, 1]]), 
+        #                                    'position_ids': tensor([[0, 1, 2]])
+        #                                   }
         inputs = self.tokenizer(text, return_tensors="pt")
 
         device = next(self.model.parameters()).device
         dst_inputs = {key: value.to(device) for key, value in inputs.items()}
 
-        outputs = self.model.generate(**dst_inputs, max_new_tokens = max_generation_tokens)
+        outputs = self.model.generate( # class GenerationMixin -> transformers/src/transformers/generation/utils.py
+                # inputs: Optional[torch.Tensor] = None, -> The sequence used as a prompt for the generation or as model inputs to the encoder.
+                input_ids = dst_inputs.get('input_ids', None),
+                # generation_config: Optional[GenerationConfig] = None, -> The generation configuration to be used as base parametrization for the generation call.
+                # logits_processor: Optional[LogitsProcessorList] = None, -> a
+                logits_processor = logits_processor if logits_processor is not None else self.default_logits_processor,
+                # stopping_criteria: Optional[StoppingCriteriaList] = None,
+                # prefix_allowed_tokens_fn: Optional[Callable[[int, torch.Tensor], List[int]]] = None,
+                # synced_gpus: Optional[bool] = None,
+                # assistant_model: Optional["PreTrainedModel"] = None,
+                # streamer: Optional["BaseStreamer"] = None,
+                # negative_prompt_ids: Optional[torch.Tensor] = None,
+                # negative_prompt_attention_mask: Optional[torch.Tensor] = None,
+                # **kwargs,
+                attention_mask = dst_inputs.get('attention_mask', None),
+                position_ids = dst_inputs.get('position_ids', None),
+                max_new_tokens = max_generation_tokens
+                )
 
         response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
         return response
 
- 
 
 
 
