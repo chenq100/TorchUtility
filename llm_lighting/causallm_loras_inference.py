@@ -1,14 +1,14 @@
 # cython: language_level=3
 ### Reference: https://huggingface.co/docs/transformers/main/peft
 
-import torch
-
 from transformers import (
     AutoModelForCausalLM,         # A generic model class that will be instantiated as one of the model classes of the library (with a causal language modeling head) 
                                   #     when created with the from_pretrained() class method or the from_config() class method.
 
     AutoTokenizer,                # A generic tokenizer class that will be instantiated as one of the tokenizer classes of the library 
                                   #     when created with the AutoTokenizer.from_pretrained() class method.
+                                  #
+    PreTrainedTokenizer,          #
                                   #
     BitsAndBytesConfig,           # This is a wrapper class about all possible attributes and features
                                   #     that you can play with a model that has been loaded using bitsandbytes. 
@@ -18,6 +18,9 @@ from transformers import (
                                   #     the 'scores' tensor represents the model's output predictions for each possible next token, based on the input sequence,
                                   #     these scores are used to determine the likelihood of each token being the next in the generated sequence.
     InfNanRemoveLogitsProcessor,  # ...
+                                  #
+    GenerationConfig,             # transformers/src/transformers/generation/configuration_utils.py
+                                  # Class that holds a configuration for a generation task.
 
     )
 
@@ -47,6 +50,99 @@ from peft import (
         )
 
 
+import torch
+
+from typing import (
+        List,
+        Dict,
+        Sequence,
+        Tuple,
+        Union,
+        Literal,
+        Optional,
+        )
+
+from abc import ABC, abstractmethod
+
+
+
+class IChatTokenIDs(ABC):
+    """
+    This abstract base class is designed for the transformation process involved in chat interactions with a LLM:
+    prompt --> messages --> input token ids --> model.generate --> output token ids --> response token ids --> completion.
+    
+    It provides a structured approach to convert textual chat prompts into a format that is suitable for LLM processing and 
+    to interpret the model's output back into human-readable text responses.
+    
+    The process involves:
+    - Converting the initial prompt into a structured 'messages' format.
+    - Transforming these messages into input token IDs for the model.
+    - Generating output token IDs from the model based on the input token IDs.
+    - Extracting response token IDs from the model's output.
+    - Transforming these response token IDs back into a completion text.
+
+    Methods:
+    - prompt_to(tokenizer, prompt): Converts a text prompt into a list of input token IDs.
+    - to_completion(tokenizer, response_tokenids): Converts a list of token IDs back into text.
+
+    The class is abstract and requires concrete implementations of its methods to specify the exact transformation logic.
+    """
+    def __init__(self, config: Dict[str, any] = None):
+        """
+        Initialize the instance with optional configuration settings.
+
+        Parameters:
+        - config: A dictionary containing optional configuration options for the transformation process.
+                  These options can customize how prompts and responses are processed.
+        """
+        self.config = config
+
+    def update_config(self, config: Dict[str, any]) -> None:
+        """
+        Update the instance's configuration settings.
+
+        This method allows updating the transformation process's configuration options at runtime.
+
+        Parameters:
+        - config: A dictionary containing new configuration options to update the transformation process.
+        """
+        self.config = config
+
+    @abstractmethod
+    def prompt_to(self, tokenizer: PreTrainedTokenizer, prompt: str) -> List[int]:
+        """
+        Transform a text prompt into a list of token IDs suitable for LLM processing, using the provided tokenizer and current configuration settings.
+
+        This method is intended to prepare user prompts for processing by a large language model (LLM).
+
+        Parameters:
+        - tokenizer: An instance of PreTrainedTokenizer, used for converting the text prompt into token IDs.
+        - prompt: The text prompt to be transformed.
+
+        Returns:
+        A list of token IDs generated from the prompt, ready for input into an LLM.
+        """
+        pass
+
+    @abstractmethod
+    def to_completion(self, tokenizer: PreTrainedTokenizer, response_tokenids: List[int]) -> str:
+        """
+        Transform a list of response token IDs back into human-readable text (completion) using the provided tokenizer and current configuration settings.
+
+        This method is intended to convert the output of a large language model (LLM), represented as token IDs, back into readable text.
+
+        Parameters:
+        - tokenizer: An instance of PreTrainedTokenizer, used for converting token IDs back into text.
+        - response_tokenids: A list of token IDs representing the model's response.
+
+        Returns:
+        A human-readable text string generated from the list of response token IDs.
+        """
+        pass
+
+
+
+
 
 lora_configs = {
     'Baichuan2': LoraConfig(                         # https://github.com/baichuan-inc/Baichuan2/blob/main/fine-tune/fine-tune.py#L129
@@ -59,6 +155,9 @@ lora_configs = {
     ),
 
 }
+
+
+
 
 class CausalLMLoRAsInference:
     def __init__(self, model_path, model_name):
@@ -249,6 +348,124 @@ class CausalLMLoRAsInference:
 
         return response
 
+    @torch.inference_mode()
+    def chat(self, prompt: str, 
+                   chat_tokenids: IChatTokenIDs,
+                   lora_name: str, 
+                   max_generation_tokens: int,
+                   logits_processor: LogitsProcessorList  = None,
+            ) -> str:
+
+        """
+        Conducts a chat session using a specified TokenIDs's transformer and configurations.
+
+        Args:
+            prompt (str): 
+
+            chat_tokenids (IChatTokenIDs): 
+                An instance of IChatTokenIDs used for:
+                    prompt_to: transforming prompt into input token IDs suitable for LLM chating.
+                    to_completion: transforming generated chat rresponse_tokenids into completion.
+        
+            lora_name (str): 
+                The name of the LLM to be used for generating responses. This could specify a particular model version or configuration.
+        
+            max_generation_tokens (int): 
+                The maximum number of tokens to be generated for the response. This limits the length of the model's output.
+        
+            logits_processor (Optional[LogitsProcessorList]): 
+                An optional list of logits processors to apply to the logits before the softmax step, allowing for manipulation of the logits to control the generation process.
+        """
+        prompt_ids = chat_tokenids.prompt_to(self.tokenizer, prompt)
+        prompt_length = len(prompt_ids)
+        input_ids = torch.tensor([prompt_ids], device = next(self.model.parameters()).device)
+
+        eos_token_ids = [self.tokenizer.eos_token_id] + self.tokenizer.additional_special_tokens_ids
+        generation_config = GenerationConfig(                      # A large number of these flags control the logits or the stopping criteria of the generation.
+                                                                   # Parameters that control the length of the output
+                # max_length (`int`, *optional*, defaults to 20): -> The maximum length the generated tokens can have.  
+                # max_new_tokens (`int`, *optional*):             -> The maximum numbers of tokens to generate, ignoring the number of tokens in the prompt.
+                # min_length (`int`, *optional*, defaults to 0):  -> The minimum length of the sequence to be generated: the length of the input prompt + `min_new_tokens`.
+                # min_new_tokens (`int`, *optional*):             -> The minimum numbers of tokens to generate, ignoring the number of tokens in the prompt.
+                # early_stopping (`bool` or `str`, *optional*, defaults to `False`): -> Controls the stopping condition for beam-based methods, like beam-search.
+                # max_time(`float`, *optional*):                  -> The maximum amount of time you allow the computation to run for in seconds.
+                                                                   # Parameters that control the generation strategy used
+                # do_sample (`bool`, *optional*, defaults to `False`): -> Whether or not to use sampling ; use greedy decoding otherwise.
+                # num_beams (`int`, *optional*, defaults to 1):   -> Number of beams for beam search. 1 means no beam search.
+                # num_beam_groups (`int`, *optional*, defaults to 1): -> Number of groups to divide `num_beams` into in order to ensure diversity among different groups of beams.
+                # penalty_alpha (`float`, *optional*):            -> The values balance the model confidence and the degeneration penalty in contrastive search decoding.
+                # use_cache (`bool`, *optional*, defaults to `True`): -> Whether or not the model should use the past last key/values attentions (if applicable to the model) to speed up decoding.
+                                                                   # Parameters for manipulation of the model output logits 
+                # temperature (`float`, *optional*, defaults to 1.0): -> The value used to modulate the next token probabilities.
+                # top_k (`int`, *optional*, defaults to 50):      -> The number of highest probability vocabulary tokens to keep for top-k-filtering.
+                # top_p (`float`, *optional*, defaults to 1.0):   -> If set to float < 1, only the smallest set of most probable tokens with probabilities that add up to `top_p` or higher are kept for generation.
+                # typical_p (`float`, *optional*, defaults to 1.0):
+                # epsilon_cutoff (`float`, *optional*, defaults to 0.0): -> If set to float strictly between 0 and 1, only tokens with a conditional probability greater than `epsilon_cutoff` will be sampled.
+                # eta_cutoff (`float`, *optional*, defaults to 0.0): -> Eta sampling is a hybrid of locally typical sampling and epsilon sampling.
+                # diversity_penalty (`float`, *optional*, defaults to 0.0): -> This value is subtracted from a beam's score if it generates a token same as any beam from other group at a particular time.
+                # repetition_penalty (`float`, *optional*, defaults to 1.0): -> The parameter for repetition penalty. 1.0 means no penalty.
+                # encoder_repetition_penalty (`float`, *optional*, defaults to 1.0): -> The paramater for encoder_repetition_penalty.
+                # length_penalty (`float`, *optional*, defaults to 1.0): -> Exponential penalty to the length that is used with beam-based generation.
+                # no_repeat_ngram_size (`int`, *optional*, defaults to 0): -> If set to int > 0, all ngrams of that size can only occur once.
+                # bad_words_ids(`List[List[int]]`, *optional*):   ->  List of list of token ids that are not allowed to be generated.
+                # force_words_ids(`List[List[int]]` or `List[List[List[int]]]`, *optional*): -> List of token ids that must be generated.
+                # renormalize_logits (`bool`, *optional*, defaults to `False`): -> Whether to renormalize the logits after applying all the logits processors or warpers (including the custom ones).
+                # constraints (`List[Constraint]`, *optional*):   -> Custom constraints that can be added to the generation to ensure that the output will contain the use of certain tokens as defined by `Constraint` objects.
+                # forced_bos_token_id (`int`, *optional*, defaults to `model.config.forced_bos_token_id`): -> The id of the token to force as the first generated token after the `decoder_start_token_id`.
+                # forced_eos_token_id (`Union[int, List[int]]`, *optional*, defaults to `model.config.forced_eos_token_id`): -> The id of the token to force as the last generated token when `max_length` is reached.
+                # remove_invalid_values (`bool`, *optional*, defaults to `model.config.remove_invalid_values`): -> Whether to remove possible *nan* and *inf* outputs of the model to prevent the generation method to crash.
+                # exponential_decay_length_penalty (`tuple(int, float)`, *optional*): -> This Tuple adds an exponentially increasing length penalty, after a certain amount of tokens have been generated.
+                # suppress_tokens  (`List[int]`, *optional*):     -> A list of tokens that will be suppressed at generation.
+                # begin_suppress_tokens  (`List[int]`, *optional*): -> A list of tokens that will be suppressed at the beginning of the generation.
+                # forced_decoder_ids (`List[List[int]]`, *optional*): -> A list of pairs of integers which indicates a mapping from generation indices to token indices that will be forced before sampling.
+                # sequence_bias (`Dict[Tuple[int], float]`, *optional*)): -> Dictionary that maps a sequence of tokens to its bias term.
+                # guidance_scale (`float`, *optional*):           -> Higher guidance scale encourages the model to generate samples that are more closely linked to the input prompt.
+                # low_memory (`bool`, *optional*):                -> Switch to sequential beam search and sequential topk for contrastive search to reduce peak memory.
+                                                                  # Parameters that define the output variables of `generate`
+                # num_return_sequences(`int`, *optional*, defaults to 1): -> The number of independently computed returned sequences for each element in the batch.
+                # output_attentions (`bool`, *optional*, defaults to `False`): -> Whether or not to return the attentions tensors of all attention layers.
+                # output_hidden_states (`bool`, *optional*, defaults to `False`): -> Whether or not to return the hidden states of all layers.
+                # output_scores (`bool`, *optional*, defaults to `False`): -> Whether or not to return the prediction scores.
+                # return_dict_in_generate (`bool`, *optional*, defaults to `False`): -> Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+                                                                  # Special tokens that can be used at generation time
+                # pad_token_id (`int`, *optional*):               -> The id of the *padding* token.
+                pad_token_id = self.tokenizer.pad_token_id,
+                # bos_token_id (`int`, *optional*):               -> The id of the *beginning-of-sequence* token.
+                # eos_token_id (`Union[int, List[int]]`, *optional*): -> The id of the *end-of-sequence* token. Optionally, use a list to set multiple *end-of-sequence* tokens.
+                eos_token_id = eos_token_ids,
+                                                                  # Generation parameters exclusive to encoder-decoder models
+                # encoder_no_repeat_ngram_size (`int`, *optional*, defaults to 0):
+                # decoder_start_token_id (`int`, *optional*):
+                                                                  # Generation parameters exclusive to [assistant generation](https://arxiv.org/abs/2211.17192)
+                # num_assistant_tokens (`int`, *optional*, defaults to 5): 
+                # num_assistant_tokens_schedule (`str`, *optional*, defaults to `"heuristic"`):
+
+
+
+                # generation_kwargs: Additional generation kwargs will be forwarded to the `generate` function of the model.
+                )
+        
+        if lora_name in self.lora_name_dict:
+            self.model.set_adapter( # Sets a specific adapter by forcing the model to use a that adapter and disable the other adapters.
+                adapter_name = lora_name # The name of the adapter to set. Can be also a list of strings to set multiple adapters.
+                )
+        else:
+            print(f"Adapter {lora_name} not found. Falling back to using the base model only.")
+            # Disable all adapters that are attached to the model. This leads to inferring with the base model only.
+            self.model.disable_adapters()
+
+        generated_tokenids = self.model.generate(
+                input_ids = input_ids,
+                generation_config = generation_config,
+                logits_processor = logits_processor if logits_processor is not None else self.default_logits_processor,
+                max_new_tokens = max_generation_tokens,
+                )
+        
+        response_tokenids = generated_tokenids[:, prompt_length:]
+
+        completion = chat_tokenids.to_completion(self.tokenizer, response_tokenids)
+
+        return completion
 
 
 
