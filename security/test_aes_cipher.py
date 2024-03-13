@@ -9,6 +9,7 @@ class TestAESCipher(unittest.TestCase):
         # Setup for tests
         self.password = "testpassword"
         self.cipher = AESCipher(password=self.password)
+        self.cipher_wrong_key = AESCipher(password="wrong_key")
 
         # Create a temporary file with test data
         self.test_data = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbbbbbbbbbbbbbbbbbbbb\ncccccccccccccccccccc\nddddddddddddddddddddddddddddddddddddddd\n"
@@ -68,6 +69,14 @@ class TestAESCipher(unittest.TestCase):
 
         # Check if decrypted data matches original data
         self.assertEqual(decrypted_stream.read(), self.test_data)
+
+    def test_decrypt_file_to_memory_wrong_key(self):
+        """ Test wrong_key decryption from file to memory """
+        self.cipher.encrypt_file_to_file(self.input_file.name, self.output_file)
+        with self.assertRaises(Exception) as e:
+            decrypted_stream = self.cipher_wrong_key.decrypt_file_to_memory(self.output_file)
+            self.self.assertTrue("This may be due to incorrect padding or an incorrect decryption key." in str(e))
+
 
     def test_decrypt_file_to_memory_with_disk_buffer(self):
         """ Test decryption from file to memory using disk buffer """
@@ -167,4 +176,3 @@ class TestAESCipher(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-

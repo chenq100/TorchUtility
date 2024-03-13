@@ -11,7 +11,7 @@ from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 
 # Configure basic logging
-logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - [%(filename)s:%(funcName)s:%(lineno)d] - %(message)s')
 
 class AESCipher:
     """
@@ -93,8 +93,12 @@ class AESCipher:
                             break
                         data += cipher.decrypt(block)
 
-                    # Remove padding and write final data
-                    decrypted_data = unpad(data, AES.block_size)
+                    try:
+                        # Remove padding and write final data
+                        decrypted_data = unpad(data, AES.block_size)
+                    except ValueError as e:
+                        logging.error(f"Error in decrypt_file_to_file during unpadding: {e}. This may be due to incorrect padding or an incorrect decryption key.")
+                        raise ValueError("Decryption failed due to unpadding error. This may indicate incorrect padding or an incorrect key.") from e
                     outfile.write(decrypted_data)
 
         except Exception as e:
@@ -129,12 +133,17 @@ class AESCipher:
                             break
                         data += cipher.decrypt(block)
 
-                    # Remove padding and write final data
-                    decrypted_data = unpad(data, AES.block_size)
+                    try:
+                        # Remove padding and write final data
+                        decrypted_data = unpad(data, AES.block_size)
+                    except ValueError as e:
+                        logging.error(f"Error in decrypt_file_to_memory during unpadding: {e}. This may be due to incorrect padding or an incorrect decryption key.")
+                        raise ValueError("Decryption failed due to unpadding error. This may indicate incorrect padding or an incorrect key.") from e
                     decrypted_stream.write(decrypted_data)
 
             decrypted_stream.seek(0)
             return decrypted_stream
+
         except Exception as e:
             logging.error(f"Error in decrypt_file_to_memory: {e}")
             raise  # Re-raise the exception
@@ -172,10 +181,15 @@ class AESCipher:
                 iv = encrypted_data[signature_len:signature_len+16]
                 encrypted_data_without_iv = encrypted_data[signature_len+16:]
                 cipher = AES.new(self.key, AES.MODE_CBC, iv)
-                decrypted_data = unpad(cipher.decrypt(encrypted_data_without_iv), AES.block_size)
+                try:
+                    decrypted_data = unpad(cipher.decrypt(encrypted_data_without_iv), AES.block_size)
+                except ValueError as e:
+                    logging.error(f"Error in decrypt_bytes during unpadding: {e}. This may be due to incorrect padding or an incorrect decryption key.")
+                    raise ValueError("Decryption failed due to unpadding error. This may indicate incorrect padding or an incorrect key.") from e
                 return decrypted_data
             else:
                 return encrypted_data
+
         except Exception as e:
             logging.error(f"Error in decrypt_bytes: Decryption failed: {e}")
             raise  # Re-raise the current exception
