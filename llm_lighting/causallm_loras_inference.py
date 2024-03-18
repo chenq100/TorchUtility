@@ -255,6 +255,7 @@ class CausalLMLoRAsInference:
 
         self.lora_name_dict = {}
 
+        #transformers/src/transformers/generation/logits_process.py
         self.default_logits_processor = LogitsProcessorList().append(InfNanRemoveLogitsProcessor())
     
     def load_lora(self, lora_path: str, lora_name: str, model_name: str) -> None:
@@ -304,7 +305,7 @@ class CausalLMLoRAsInference:
             raise
 
     @torch.inference_mode()
-    def generate(self, text: str, lora_name: str, max_generation_tokens: int, 
+    def generate(self, text: str, lora_name: str, max_new_tokens: int, 
                     logits_processor: LogitsProcessorList  = None,
             ):
         if lora_name in self.lora_name_dict:
@@ -341,7 +342,7 @@ class CausalLMLoRAsInference:
                 # **kwargs,
                 attention_mask = dst_inputs.get('attention_mask', None),
                 position_ids = dst_inputs.get('position_ids', None),
-                max_new_tokens = max_generation_tokens
+                max_new_tokens = max_new_tokens
                 )
 
         response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
@@ -352,8 +353,9 @@ class CausalLMLoRAsInference:
     def chat(self, prompt: str, 
                    chat_tokenids: IChatTokenIDs,
                    lora_name: str, 
-                   max_generation_tokens: int,
+                   max_new_tokens: int,
                    logits_processor: LogitsProcessorList  = None,
+                   **kwargs
             ) -> str:
 
         """
@@ -370,19 +372,20 @@ class CausalLMLoRAsInference:
             lora_name (str): 
                 The name of the LLM to be used for generating responses. This could specify a particular model version or configuration.
         
-            max_generation_tokens (int): 
+            max_new_tokens (int): 
                 The maximum number of tokens to be generated for the response. This limits the length of the model's output.
         
             logits_processor (Optional[LogitsProcessorList]): 
                 An optional list of logits processors to apply to the logits before the softmax step, allowing for manipulation of the logits to control the generation process.
         """
-        prompt_ids = chat_tokenids.prompt_to(self.tokenizer, prompt)
-        prompt_length = len(prompt_ids)
-        input_ids = torch.tensor([prompt_ids], device = next(self.model.parameters()).device)
 
-        eos_token_ids = [self.tokenizer.eos_token_id] + self.tokenizer.additional_special_tokens_ids
+        gen_config_dict = kwargs.copy()
+        gen_config_dict['max_new_tokens'] = max_new_tokens
+        gen_config_dict['pad_token_id'] = self.tokenizer.pad_token_id
+        gen_config_dict['eos_token_id'] = [self.tokenizer.eos_token_id] + self.tokenizer.additional_special_tokens_ids
+
         generation_config = GenerationConfig(                      # A large number of these flags control the logits or the stopping criteria of the generation.
-                                                                   # Parameters that control the length of the output
+                **gen_config_dict                                  # Parameters that control the length of the output
                 # max_length (`int`, *optional*, defaults to 20): -> The maximum length the generated tokens can have.  
                 # max_new_tokens (`int`, *optional*):             -> The maximum numbers of tokens to generate, ignoring the number of tokens in the prompt.
                 # min_length (`int`, *optional*, defaults to 0):  -> The minimum length of the sequence to be generated: the length of the input prompt + `min_new_tokens`.
@@ -429,10 +432,8 @@ class CausalLMLoRAsInference:
                 # return_dict_in_generate (`bool`, *optional*, defaults to `False`): -> Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
                                                                   # Special tokens that can be used at generation time
                 # pad_token_id (`int`, *optional*):               -> The id of the *padding* token.
-                pad_token_id = self.tokenizer.pad_token_id,
                 # bos_token_id (`int`, *optional*):               -> The id of the *beginning-of-sequence* token.
                 # eos_token_id (`Union[int, List[int]]`, *optional*): -> The id of the *end-of-sequence* token. Optionally, use a list to set multiple *end-of-sequence* tokens.
-                eos_token_id = eos_token_ids,
                                                                   # Generation parameters exclusive to encoder-decoder models
                 # encoder_no_repeat_ngram_size (`int`, *optional*, defaults to 0):
                 # decoder_start_token_id (`int`, *optional*):
@@ -454,11 +455,14 @@ class CausalLMLoRAsInference:
             # Disable all adapters that are attached to the model. This leads to inferring with the base model only.
             self.model.disable_adapters()
 
+        prompt_ids = chat_tokenids.prompt_to(self.tokenizer, prompt)
+        prompt_length = len(prompt_ids)
+        input_ids = torch.tensor([prompt_ids], device = next(self.model.parameters()).device)
+
         generated_tokenids = self.model.generate(
                 input_ids = input_ids,
                 generation_config = generation_config,
                 logits_processor = logits_processor if logits_processor is not None else self.default_logits_processor,
-                max_new_tokens = max_generation_tokens,
                 )
         
         response_tokenids = generated_tokenids[:, prompt_length:]
