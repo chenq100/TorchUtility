@@ -62,7 +62,11 @@ from typing import (
         Optional,
         )
 
+from enum import Enum, auto
+
 from abc import ABC, abstractmethod
+
+import inspect
 
 
 
@@ -160,15 +164,42 @@ lora_configs = {
 
 
 class CausalLMLoRAsInference:
-    def __init__(self, model_path, model_name):
+    def __init__(self, model_path, model_name, q_bits: int = None, device_map = "auto", runtime_model_dtype = torch.float32):
+        """
+        Args:
+            q_bits (int): An integer specifying the number of bits used for quantization, must be within the range of 1 to 8.
+            runtime_model_dtype: Specifies the data type of the model parameters at runtime, especially on CPU,
+                Essential for ensuring compatibility across different environments, as some CPUs may 
+                  not support certain data types (e.g., float16), potentially leading to runtime errors,
+                  for example ==> RuntimeError: "addmm_impl_cpu_" not implemented for 'Half'.
+        """
         self.model_name = model_name
+        if q_bits is not None and (q_bits < 0 or q_bits > 8):
+            raise ValueError(f"Unsupported value for q_bits: {q_bits}. The number of quantization bits (q_bits) must be between 1 and 8, inclusive.")
+        self.q_bits = q_bits
+        if device_map == "auto":
+            self.device_map = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device_map = torch.device(device_map)
+        print(f"arg device_map is {device_map} ==> {self.device_map}")
+        if self.device_map.type not in ["cpu", "cuda"]:
+            raise ValueError(f"Unsupported device_map: {self.device_map}. Only 'cpu' and 'cuda' are supported.")
 
-        bnb_config_nf4 = BitsAndBytesConfig(                  # https://huggingface.co/docs/transformers/main_classes/quantization#transformers.BitsAndBytesConfig
+        self.bnb_config_list =  [None] * 8
+        # 4Bits
+        if self.q_bits == 4:
+            bnb_config_nf4 = BitsAndBytesConfig(                  # https://huggingface.co/docs/transformers/main_classes/quantization#transformers.BitsAndBytesConfig
                         load_in_4bit=True,                    # enable 4-bit quantization by replacing the Linear layers with FP4/NF4 layers from bitsandbytes
                         bnb_4bit_quant_type="nf4",            # sets the quantization data type in the bnb.nn.Linear4Bit layers
                         bnb_4bit_use_double_quant=True,       # used for nested quantization where the quantization constants from the first quantization are quantized again
                         bnb_4bit_compute_dtype=torch.bfloat16 # sets the computational type which might be different than the input time
                         )
+            self.bnb_config_list[4] = bnb_config_nf4
+        # 8Bits
+        elif self.q_bits == 8:
+            raise ValueError(f"Unsupported q_bits: {self.q_bits}.")
+        else:
+            print("no quantization")
 
 
         # PreTrainedModel -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L1127
@@ -203,14 +234,14 @@ class CausalLMLoRAsInference:
                 # torch_dtype = kwargs.pop("torch_dtype", None)
                 # low_cpu_mem_usage = kwargs.pop("low_cpu_mem_usage", None)
                 # device_map = kwargs.pop("device_map", None)
-                device_map="auto",
+                device_map = self.device_map,
                 # max_memory = kwargs.pop("max_memory", None)
                 # offload_folder = kwargs.pop("offload_folder", None)
                 # offload_state_dict = kwargs.pop("offload_state_dict", False)
                 # load_in_8bit = kwargs.pop("load_in_8bit", False)
                 # load_in_4bit = kwargs.pop("load_in_4bit", False)              -> used to enable 4-bit quantization by replacing the Linear layers with FP4/NF4 layers from bitsandbytes
                 # quantization_config = kwargs.pop("quantization_config", None)
-                quantization_config = bnb_config_nf4,
+                quantization_config = self.bnb_config_list[self.q_bits] if self.q_bits is not None else None,
                 # subfolder = kwargs.pop("subfolder", "")
                 # commit_hash = kwargs.pop("_commit_hash", None)
                 # variant = kwargs.pop("variant", None)
@@ -218,7 +249,14 @@ class CausalLMLoRAsInference:
                 # adapter_name = kwargs.pop("adapter_name", "default")
                 # use_flash_attention_2 = kwargs.pop("use_flash_attention_2", False)
                 )
-        
+
+        # Convert the loaded model to float32 to ensure compatibility with CPU operations, avoiding 'Half' data type errors
+        #   ==> RuntimeError: "addmm_impl_cpu_" not implemented for 'Half'
+        if next(self.model.parameters()).device.type == 'cpu':        
+            print(f"self.model.parameters() is being on cpu-ram")
+            self.model = self.model.to(dtype = runtime_model_dtype)
+
+
 
         self.tokenizer = AutoTokenizer.from_pretrained(         # Reference: src/transformers/models/auto/tokenization_auto.py
                 pretrained_model_name_or_path = model_path,     # A path to a *directory* containing vocabulary files required by the tokenizer.
@@ -459,11 +497,15 @@ class CausalLMLoRAsInference:
         prompt_length = len(prompt_ids)
         input_ids = torch.tensor([prompt_ids], device = next(self.model.parameters()).device)
 
-        generated_tokenids = self.model.generate(
+        try:
+            generated_tokenids = self.model.generate(
                 input_ids = input_ids,
                 generation_config = generation_config,
                 logits_processor = logits_processor if logits_processor is not None else self.default_logits_processor,
                 )
+        except Exception as e:
+            print(f"Exception raise with self.model.generate( ... ), error message is {e}")
+            raise
         
         response_tokenids = generated_tokenids[:, prompt_length:]
 
