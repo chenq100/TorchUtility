@@ -2,6 +2,8 @@
 ### Reference: https://huggingface.co/docs/transformers/main/peft
 
 from transformers import (
+    AutoConfig,                   # 
+                                  #
     AutoModelForCausalLM,         # A generic model class that will be instantiated as one of the model classes of the library (with a causal language modeling head) 
                                   #     when created with the from_pretrained() class method or the from_config() class method.
 
@@ -164,7 +166,7 @@ lora_configs = {
 
 
 class CausalLMLoRAsInference:
-    def __init__(self, model_path, model_name, q_bits: int = None, device_map = "auto", runtime_model_dtype = torch.float32):
+    def __init__(self, model_path, model_name, q_bits: int = None, device_map = "auto", runtime_model_dtype = torch.float32, prefix_seq_len = None):
         """
         Args:
             q_bits (int): An integer specifying the number of bits used for quantization, must be within the range of 1 to 8.
@@ -201,6 +203,34 @@ class CausalLMLoRAsInference:
         else:
             print("no quantization")
 
+        # transformers/src/transformers/models/auto/configuration_auto.py
+        # This is a generic configuration class that will be instantiated as one of the configuration classes of the library.
+        model_config = AutoConfig.from_pretrained(
+                pretrained_model_name_or_path =model_path, 
+                # cache_dir (`str` or `os.PathLike`, *optional*): Path to a directory in which a downloaded pretrained model configuration should be cached.
+                # force_download (`bool`, *optional*, defaults to `False`): Whether or not to force the (re-)download the model weights and configuration files.
+                # resume_download (`bool`, *optional*, defaults to `False`): Whether or not to delete incompletely received files.
+                # proxies (`Dict[str, str]`, *optional*): A dictionary of proxy servers to use by protocol or endpoint.
+                # revision (`str`, *optional*, defaults to `"main"`): The specific model version to use.
+                # return_unused_kwargs (`bool`, *optional*, defaults to `False`): If `True`, then this functions returns a `Tuple(config, unused_kwargs).
+                # trust_remote_code (`bool`, *optional*, defaults to `False`): Whether or not to allow for custom models defined on the Hub in their own modeling files.
+                trust_remote_code=True,
+                # kwargs(additional keyword arguments, *optional*): 
+                )
+
+        # PrefixEncoder
+        #
+        # The model will define prefix_encoder only if the model config contains pre_seq_len.
+        if prefix_seq_len is not None:
+            # PrefixEncoder: prompt tuning introduced learnable continuous prompts
+            # https://github.com/THUDM/P-tuning-v2/blob/main/model/prefix_encoder.py
+            # class PrefixEncoder(torch.nn.Module):
+            #     def __init__(self, config):
+            #         ...
+            #         self.embedding = torch.nn.Embedding(config.pre_seq_len, config.hidden_size)
+            #         ...
+            model_config.pre_seq_len = prefix_seq_len
+
 
         # PreTrainedModel -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L1127
         # _BaseAutoModelClass -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/models/auto/auto_factory.py#L400
@@ -215,6 +245,10 @@ class CausalLMLoRAsInference:
                 # cls, 
                 pretrained_model_name_or_path = model_path,
                 # *model_args,                                one '*' used to collect all additional positional parameters
+                #
+                # config: Optional[Union[PretrainedConfig, str, os.PathLike]] = None -> Configuration for the model to use instead of an automatically loaded configuration.
+                config = model_config,
+                #
                 # **kwargs                                    two '**' used to collect all additional keyword arguments
                 #
                 # 
@@ -256,6 +290,16 @@ class CausalLMLoRAsInference:
             print(f"self.model.parameters() is being on cpu-ram")
             self.model = self.model.to(dtype = runtime_model_dtype)
 
+        if prefix_seq_len is not None:
+            # Check if a specific length for the prefix sequence is provided (`prefix_seq_len` is not None).
+            # This also implies that `self.model.transformer.prefix_encoder` exists within our model's architecture,
+            # indicating we have a prefix encoder component in the transformer model that can be initialized
+            # or manipulated based on the prefix sequence length.
+            # By saving the initial state of the `prefix_encoder`, we ensure that we can always revert
+            # this component to its original state after any modifications or experiments.
+            # This is particularly useful for dynamic adjustments to the prefix encoder's settings or
+            # for experimental purposes where the encoder's state needs to be reset to a baseline condition.
+            self.initial_prefix_state_dict = self.model.transformer.prefix_encoder.state_dict()
 
 
         self.tokenizer = AutoTokenizer.from_pretrained(         # Reference: src/transformers/models/auto/tokenization_auto.py
@@ -292,6 +336,7 @@ class CausalLMLoRAsInference:
             print(f"Derived classes [{self.tokenizer_type_name}] override PreTrainedTokenizerBase._pad")
 
         self.lora_name_dict = {}
+        self.prefix_name_dict = {}
 
         #transformers/src/transformers/generation/logits_process.py
         self.default_logits_processor = LogitsProcessorList().append(InfNanRemoveLogitsProcessor())
@@ -307,7 +352,7 @@ class CausalLMLoRAsInference:
                 Use as a key in the loraconfig dictionary to search for the LoraConfig, that a derived class of peft.PeftConfig.
         """
         if lora_name not in self.lora_name_dict:
-            self.lora_name_dict[lora_name] = [lora_name, model_name]
+            self.lora_name_dict[lora_name] = [lora_path, lora_name, model_name]
         else:
             raise ValueError(f"The lora_name key '{lora_name}' already exists in the dictionary.")
         
@@ -341,6 +386,46 @@ class CausalLMLoRAsInference:
         except Exception as e:
             print(f"Failed to load adapter {lora_name}---{lora_path}, {e}")
             raise
+
+    def load_prefix(self, prefix_model_file: str, prefix_name: str, model_name: str) -> None:
+        """
+        based on:
+                 peft/src/peft/tuners/prefix_tuning/model.py
+                 https://github.com/THUDM/P-tuning-v2/blob/main/model/prefix_encoder.py
+
+        Loads a model-specific prefix from a specified path. This prefix can be used
+        to fine-tune the model on a specific task by adding trainable parameters to 
+        the model's input, without altering the pretrained model's internal weights.
+
+        :param prefix_model_file: str, the file where the prefix data is stored. 
+        :param prefix_name: str, the name of the prefix to be loaded. This can be used to
+                          select a specific prefix, when used for hot switching.
+        :param model_name: str, the name of the model for which the prefix is intended.
+                        This ensures that the loaded prefix matches the expected model.
+        :return: None. The function performs an action (e.g., loading data, setting state)
+              but does not return any value.
+        """
+        if prefix_name not in self.prefix_name_dict:
+            self.prefix_name_dict[prefix_name] = [None, prefix_model_file, prefix_name, model_name]
+        else:
+            raise ValueError(f"The prefix_name key '{prefix_name}' already exists in the dictionary.")
+
+        try:
+            prefix_state_dict = torch.load(prefix_model_file)
+            prefix_dict = {}
+            for k, v in prefix_state_dict.items():
+                if k.startswith("transformer.prefix_encoder."):
+                    prefix_dict[k[len("transformer.prefix_encoder."):]] = v
+            self.prefix_name_dict[prefix_name][0] = prefix_dict
+            # param_name = next(iter(self.prefix_name_dict[prefix_name][0]))
+            # param_device = self.prefix_name_dict[prefix_name][0][param_name].device
+            # print(f"The parameter '{param_name}' is stored on {param_device}")
+            #self.model.transformer.prefix_encoder.load_state_dict(prefix_dict)
+            print(f"Prefix {prefix_name}---{prefix_model_file}, loaded successfully.")
+        except Exception as e:
+            print(f"Failed to load prefix {prefix_name}---{prefix_model_file}, {e}")
+
+
 
     @torch.inference_mode()
     def generate(self, text: str, lora_name: str, max_new_tokens: int, 
@@ -390,8 +475,9 @@ class CausalLMLoRAsInference:
     @torch.inference_mode()
     def chat(self, prompt: str, 
                    chat_tokenids: IChatTokenIDs,
-                   lora_name: str, 
-                   max_new_tokens: int,
+                   lora_name: str = None,
+                   prefix_name: str = None,
+                   max_new_tokens: int = 512,
                    logits_processor: LogitsProcessorList  = None,
                    **kwargs
             ) -> str:
@@ -408,7 +494,10 @@ class CausalLMLoRAsInference:
                     to_completion: transforming generated chat rresponse_tokenids into completion.
         
             lora_name (str): 
-                The name of the LLM to be used for generating responses. This could specify a particular model version or configuration.
+                The name of the LoRA Adapter enabled to be used for generating responses.
+
+            prefix_name (str):
+                The name of the PrefixEncoder enabled to be used for generating responses.
         
             max_new_tokens (int): 
                 The maximum number of tokens to be generated for the response. This limits the length of the model's output.
@@ -416,7 +505,6 @@ class CausalLMLoRAsInference:
             logits_processor (Optional[LogitsProcessorList]): 
                 An optional list of logits processors to apply to the logits before the softmax step, allowing for manipulation of the logits to control the generation process.
         """
-
         gen_config_dict = kwargs.copy()
         gen_config_dict['max_new_tokens'] = max_new_tokens
         gen_config_dict['pad_token_id'] = self.tokenizer.pad_token_id
@@ -485,13 +573,34 @@ class CausalLMLoRAsInference:
                 )
         
         if lora_name in self.lora_name_dict:
+            print(f"Adapter {lora_name} enabled.")
             self.model.set_adapter( # Sets a specific adapter by forcing the model to use a that adapter and disable the other adapters.
                 adapter_name = lora_name # The name of the adapter to set. Can be also a list of strings to set multiple adapters.
                 )
         else:
             print(f"Adapter {lora_name} not found. Falling back to using the base model only.")
-            # Disable all adapters that are attached to the model. This leads to inferring with the base model only.
-            self.model.disable_adapters()
+            if self.lora_name_dict:
+                # Disable all adapters that are attached to the model. This leads to inferring with the base model only.
+                self.model.disable_adapters()
+
+        if hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'prefix_encoder'):
+            if prefix_name in self.prefix_name_dict:
+                # Using .load_state_dict(prefix_dict) updates model parameters with values from prefix_dict,
+                # with matching keys dictating which parameters are updated. Subsequent calls with a new state dictionary
+                # will overwrite existing parameter values based on these keys.
+                #
+                # Caution:
+                # - Parameters not present in the new state dictionary but exist in the model retain their values,
+                #   potentially leading to "stale" data if not intentionally managed.
+                # - Keys in the new state dictionary that don't match any parameter name in the model are ignored when strict=False,
+                #   or raise an error if strict=True (default behavior), highlighting mismatches between the model and state dictionary.
+                print(f"Prefix {prefix_name} enabled.")
+                self.model.transformer.prefix_encoder.load_state_dict(self.prefix_name_dict[prefix_name][0])
+            else:
+                print(f"Prefix {prefix_name} not found. Falling back to using the base model only.")
+                self.model.transformer.prefix_encoder.load_state_dict(self.initial_prefix_state_dict)
+        else:
+            print("The model does not have transformer and/or prefix_encoder attributes.")
 
         prompt_ids = chat_tokenids.prompt_to(self.tokenizer, prompt)
         prompt_length = len(prompt_ids)
