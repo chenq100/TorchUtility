@@ -24,6 +24,29 @@ from transformers import (
     GenerationConfig,             # transformers/src/transformers/generation/configuration_utils.py
                                   # Class that holds a configuration for a generation task.
 
+    BatchEncoding,                # transformers/src/transformers/tokenization_utils_base.py
+                                  #     class BatchEncoding(UserDict): 
+                                  #         Args:
+                                  #             data (`dict`, *optional*):
+                                  #                  Dictionary of lists/arrays/tensors returned by the `__call__`/`encode_plus`/`batch_encode_plus` methods
+                                  #                  ('input_ids', 'attention_mask', etc.).
+                                  #             encoding (`tokenizers.Encoding` or `Sequence[tokenizers.Encoding]`, *optional*):
+                                  #                  If the tokenizer is a fast tokenizer which outputs additional information like mapping from word/character
+                                  #                  space to token space the `tokenizers.Encoding` instance or list of instance (for batches) hold this
+                                  #                  information.
+                                  #             tensor_type (`Union[None, str, TensorType]`, *optional*):
+                                  #                  You can give a tensor_type here to convert the lists of integers in PyTorch/TensorFlow/Numpy Tensors at
+                                  #                      initialization.
+                                  #             prepend_batch_axis (`bool`, *optional*, defaults to `False`):
+                                  #                 Whether or not to add a batch axis when converting to tensors (see `tensor_type` above).
+                                  #             n_sequences (`Optional[int]`, *optional*):
+                                  #                 You can give a tensor_type here to convert the lists of integers in PyTorch/TensorFlow/Numpy Tensors at
+                                  #                 initialization.
+                                  #         def to(self, device: Union[str, "torch.device"]) -> "BatchEncoding":
+                                  #             Send all values to device by calling `v.to(device)` (PyTorch only).
+                                  #     Holds the output of the [`~tokenization_utils_base.PreTrainedTokenizerBase.__call__`]
+                                  #     This class is derived from a python dictionary and can be used as a dictionary.
+                                  #     
     )
 
 from peft import (
@@ -51,6 +74,9 @@ from peft import (
         TaskType
         )
 
+from safetensors import (  # Simple, safe way to store and distribute tensors
+        safe_open
+        )
 
 import torch
 
@@ -69,7 +95,9 @@ from enum import Enum, auto
 from abc import ABC, abstractmethod
 
 import inspect
-
+import os
+import logging
+from pathlib import Path
 
 
 class IChatTokenIDs(ABC):
@@ -115,7 +143,7 @@ class IChatTokenIDs(ABC):
         self.config = config
 
     @abstractmethod
-    def prompt_to(self, tokenizer: PreTrainedTokenizer, prompt: str) -> List[int]:
+    def prompt_to(self, tokenizer: PreTrainedTokenizer, prompt: str) -> Union[List[int], BatchEncoding]:
         """
         Transform a text prompt into a list of token IDs suitable for LLM processing, using the provided tokenizer and current configuration settings.
 
@@ -126,7 +154,9 @@ class IChatTokenIDs(ABC):
         - prompt: The text prompt to be transformed.
 
         Returns:
-        A list of token IDs generated from the prompt, ready for input into an LLM.
+        - A list of token IDs generated from the prompt, ready for input into an LLM,
+          or 
+        - BatchEncoding same as `~tokenization_utils_base.PreTrainedTokenizerBase.__call__`
         """
         pass
 
@@ -148,25 +178,45 @@ class IChatTokenIDs(ABC):
 
 
 
-
-
-lora_configs = {
-    'Baichuan2': LoraConfig(                         # https://github.com/baichuan-inc/Baichuan2/blob/main/fine-tune/fine-tune.py#L129
-        task_type = TaskType.CAUSAL_LM,
-        target_modules = ["W_pack"]
-    ),
-    'ChatGLM3': LoraConfig(
-        task_type = TaskType.CAUSAL_LM,
-        target_modules = ["query_key_value"]
-    ),
-
-}
-
-
-
-
 class CausalLMLoRAsInference:
-    def __init__(self, model_path, model_name, q_bits: int = None, device_map = "auto", runtime_model_dtype = torch.float32, prefix_seq_len = None):
+    @staticmethod
+    def logging_setup(log_level = None, log_file: Union[str, Path] = None):
+        print(f"#########logging_setup {log_level} {log_file}############")
+        valid_log_levels = [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR, logging.CRITICAL]
+        if log_level not in valid_log_levels and log_level is not None:
+            raise ValueError("Invalid log_level. Must be one of logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR, or logging.CRITICAL.")
+        elif not log_level:
+            print(f"logging_setup({log_level}, {log_file}), not set")
+            return 
+
+        # create a logger
+        logger = logging.getLogger()
+        logger.setLevel(log_level)
+
+        # create log format
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - [%(filename)s:%(funcName)s:%(lineno)d] - %(message)s')
+
+        # create a handler used to output logs to the screen
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(log_level)
+        # set format for handler
+        console_handler.setFormatter(formatter)
+        # add handler to logger
+        logger.addHandler(console_handler)
+
+        log2 = "log2console"
+
+        if log_file:
+            # create a handler used to write logs to a file
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+            log2 = f"log2console and log2file:{log_file}"
+
+        logger.info("logging_setup succ: {log_level} and {log2}")
+
+    def __init__(self, model_path, model_name, log_level = None, log_file = None, q_bits: int = None, device_map = "auto", runtime_model_dtype = torch.float32, prefix_seq_len = None):
         """
         Args:
             q_bits (int): An integer specifying the number of bits used for quantization, must be within the range of 1 to 8.
@@ -175,15 +225,19 @@ class CausalLMLoRAsInference:
                   not support certain data types (e.g., float16), potentially leading to runtime errors,
                   for example ==> RuntimeError: "addmm_impl_cpu_" not implemented for 'Half'.
         """
+        self.logging_setup(log_level = log_level, log_file = log_file)
+
         self.model_name = model_name
+
         if q_bits is not None and (q_bits < 0 or q_bits > 8):
             raise ValueError(f"Unsupported value for q_bits: {q_bits}. The number of quantization bits (q_bits) must be between 1 and 8, inclusive.")
         self.q_bits = q_bits
+        
         if device_map == "auto":
             self.device_map = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device_map = torch.device(device_map)
-        print(f"arg device_map is {device_map} ==> {self.device_map}")
+        logging.info(f"arg device_map is {device_map} ==> {self.device_map}")
         if self.device_map.type not in ["cpu", "cuda"]:
             raise ValueError(f"Unsupported device_map: {self.device_map}. Only 'cpu' and 'cuda' are supported.")
 
@@ -201,8 +255,9 @@ class CausalLMLoRAsInference:
         elif self.q_bits == 8:
             raise ValueError(f"Unsupported q_bits: {self.q_bits}.")
         else:
-            print("no quantization")
+            logging.info("no quantization")
 
+        
         # transformers/src/transformers/models/auto/configuration_auto.py
         # This is a generic configuration class that will be instantiated as one of the configuration classes of the library.
         model_config = AutoConfig.from_pretrained(
@@ -287,7 +342,7 @@ class CausalLMLoRAsInference:
         # Convert the loaded model to float32 to ensure compatibility with CPU operations, avoiding 'Half' data type errors
         #   ==> RuntimeError: "addmm_impl_cpu_" not implemented for 'Half'
         if next(self.model.parameters()).device.type == 'cpu':        
-            print(f"self.model.parameters() is being on cpu-ram")
+            logging.info(f"self.model.parameters() is being on cpu-ram")
             self.model = self.model.to(dtype = runtime_model_dtype)
 
         if prefix_seq_len is not None:
@@ -324,16 +379,16 @@ class CausalLMLoRAsInference:
                 )
 
         self.tokenizer_type_name = self.tokenizer.__class__.__name__
-        print(f"tokenizer_class_name is:  {self.tokenizer_type_name}")
+        logging.info(f"tokenizer_class_name is:  {self.tokenizer_type_name}")
 
         import types
         from transformers import PreTrainedTokenizerBase        #
         base_pad_method = getattr(PreTrainedTokenizerBase, '_pad')
         tokenizer_pad_method = getattr(self.tokenizer.__class__, '_pad')
         if tokenizer_pad_method is base_pad_method:
-            print(f"Derived classes [{self.tokenizer_type_name}] do not override PreTrainedTokenizerBase._pad")
+            logging.info(f"Derived classes [{self.tokenizer_type_name}] do not override PreTrainedTokenizerBase._pad")
         else:
-            print(f"Derived classes [{self.tokenizer_type_name}] override PreTrainedTokenizerBase._pad")
+            logging.info(f"Derived classes [{self.tokenizer_type_name}] override PreTrainedTokenizerBase._pad")
 
         self.lora_name_dict = {}
         self.prefix_name_dict = {}
@@ -382,12 +437,12 @@ class CausalLMLoRAsInference:
                 # Additional keyword arguments passed along to the `from_pretrained` method of the adapter config and `find_adapter_config_file` method.
                 #adapter_kwargs: Optional[Dict[str, Any]] = None
             )
-            print(f"Adapter {lora_name}---{lora_path}, loaded successfully.")
+            logging.info(f"Adapter {lora_name}---{lora_path}, loaded successfully.")
         except Exception as e:
-            print(f"Failed to load adapter {lora_name}---{lora_path}, {e}")
+            logging.error(f"Failed to load adapter {lora_name}---{lora_path}, {e}")
             raise
 
-    def load_prefix(self, prefix_model_file: str, prefix_name: str, model_name: str) -> None:
+    def load_prefix(self, prefix_path: str, prefix_name: str, model_name: str) -> None:
         """
         based on:
                  peft/src/peft/tuners/prefix_tuning/model.py
@@ -397,7 +452,8 @@ class CausalLMLoRAsInference:
         to fine-tune the model on a specific task by adding trainable parameters to 
         the model's input, without altering the pretrained model's internal weights.
 
-        :param prefix_model_file: str, the file where the prefix data is stored. 
+        :param prefix_path: str, the file where the prefix data is stored. 
+                          
         :param prefix_name: str, the name of the prefix to be loaded. This can be used to
                           select a specific prefix, when used for hot switching.
         :param model_name: str, the name of the model for which the prefix is intended.
@@ -406,77 +462,45 @@ class CausalLMLoRAsInference:
               but does not return any value.
         """
         if prefix_name not in self.prefix_name_dict:
-            self.prefix_name_dict[prefix_name] = [None, prefix_model_file, prefix_name, model_name]
+            self.prefix_name_dict[prefix_name] = [None, prefix_path, prefix_name, model_name]
         else:
             raise ValueError(f"The prefix_name key '{prefix_name}' already exists in the dictionary.")
 
+        prefix_dict = {}
+
         try:
-            prefix_state_dict = torch.load(prefix_model_file)
-            prefix_dict = {}
-            for k, v in prefix_state_dict.items():
-                if k.startswith("transformer.prefix_encoder."):
-                    prefix_dict[k[len("transformer.prefix_encoder."):]] = v
-            self.prefix_name_dict[prefix_name][0] = prefix_dict
-            # param_name = next(iter(self.prefix_name_dict[prefix_name][0]))
-            # param_device = self.prefix_name_dict[prefix_name][0][param_name].device
-            # print(f"The parameter '{param_name}' is stored on {param_device}")
-            #self.model.transformer.prefix_encoder.load_state_dict(prefix_dict)
-            print(f"Prefix {prefix_name}---{prefix_model_file}, loaded successfully.")
+            if os.path.exists(os.path.join(prefix_path, "pytorch_model.bin")):  
+                prefix_state_dict = torch.load(os.path.join(prefix_path, "pytorch_model.bin"))
+                for k, v in prefix_state_dict.items():
+                    if k.startswith("transformer.prefix_encoder."):
+                        prefix_dict[k[len("transformer.prefix_encoder."):]] = v
+                        logging.debug(k[len("transformer.prefix_encoder."):])
+                # param_name = next(iter(self.prefix_name_dict[prefix_name][0]))
+                # param_device = self.prefix_name_dict[prefix_name][0][param_name].device
+                # print(f"The parameter '{param_name}' is stored on {param_device}")
+                #self.model.transformer.prefix_encoder.load_state_dict(prefix_dict)
+                logging.info(f"Prefix {prefix_name}/pytorch_model.bin, loaded successfully.")
+            elif os.path.exists(os.path.join(prefix_path, "model.safetensors")):
+                with safe_open(os.path.join(prefix_path, "model.safetensors"), framework="pt") as f:
+                    for idx, k in enumerate(f.keys()):
+                        key = k[len("transformer.prefix_encoder."):] # remove the prefix "transformer.prefix_encoder." from the string 'k'.
+                        prefix_dict[key] = f.get_tensor(k)
+                        logging.debug(f"model.safetensors's {idx} key is: {key}")
+                logging.info(f"Prefix {prefix_name}/model.safetensors, loaded successfully.")
+            else:
+                raise FileNotFoundError(f"The required pytorch_model.bin or model.safetensors {prefix_path} does not exist.")
         except Exception as e:
-            print(f"Failed to load prefix {prefix_name}---{prefix_model_file}, {e}")
+            logging.error(f"Failed to load prefix {prefix_name} in {prefix_path}, {e}")
+            raise
 
+        self.prefix_name_dict[prefix_name][0] = prefix_dict
 
-
-    @torch.inference_mode()
-    def generate(self, text: str, lora_name: str, max_new_tokens: int, 
-                    logits_processor: LogitsProcessorList  = None,
-            ):
-        if lora_name in self.lora_name_dict:
-            self.model.set_adapter( # Sets a specific adapter by forcing the model to use a that adapter and disable the other adapters.
-                adapter_name = lora_name # The name of the adapter to set. Can be also a list of strings to set multiple adapters.
-                )
-        else:
-            print(f"Adapter {lora_name} not found. Falling back to using the base model only.")
-            # Disable all adapters that are attached to the model. This leads to inferring with the base model only.
-            self.model.disable_adapters()
-
-        # the return inputs is a dict like: {'input_ids': tensor([[64790, 64792, 24954]]), 
-        #                                    'attention_mask': tensor([[1, 1, 1]]), 
-        #                                    'position_ids': tensor([[0, 1, 2]])
-        #                                   }
-        inputs = self.tokenizer(text, return_tensors="pt")
-
-        device = next(self.model.parameters()).device
-        dst_inputs = {key: value.to(device) for key, value in inputs.items()}
-
-        outputs = self.model.generate( # class GenerationMixin -> transformers/src/transformers/generation/utils.py
-                # inputs: Optional[torch.Tensor] = None, -> The sequence used as a prompt for the generation or as model inputs to the encoder.
-                input_ids = dst_inputs.get('input_ids', None),
-                # generation_config: Optional[GenerationConfig] = None, -> The generation configuration to be used as base parametrization for the generation call.
-                # logits_processor: Optional[LogitsProcessorList] = None, -> a
-                logits_processor = logits_processor if logits_processor is not None else self.default_logits_processor,
-                # stopping_criteria: Optional[StoppingCriteriaList] = None,
-                # prefix_allowed_tokens_fn: Optional[Callable[[int, torch.Tensor], List[int]]] = None,
-                # synced_gpus: Optional[bool] = None,
-                # assistant_model: Optional["PreTrainedModel"] = None,
-                # streamer: Optional["BaseStreamer"] = None,
-                # negative_prompt_ids: Optional[torch.Tensor] = None,
-                # negative_prompt_attention_mask: Optional[torch.Tensor] = None,
-                # **kwargs,
-                attention_mask = dst_inputs.get('attention_mask', None),
-                position_ids = dst_inputs.get('position_ids', None),
-                max_new_tokens = max_new_tokens
-                )
-
-        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        return response
 
     @torch.inference_mode()
     def chat(self, prompt: str, 
-                   chat_tokenids: IChatTokenIDs,
-                   lora_name: str = None,
-                   prefix_name: str = None,
+                   lora_chat_tokenids: IChatTokenIDs = None,
+                   prefix_chat_tokenids: IChatTokenIDs = None,
+                   lora_or_prefix_name: str = None,
                    max_new_tokens: int = 512,
                    logits_processor: LogitsProcessorList  = None,
                    **kwargs
@@ -488,15 +512,16 @@ class CausalLMLoRAsInference:
         Args:
             prompt (str): 
 
-            chat_tokenids (IChatTokenIDs): 
-                An instance of IChatTokenIDs used for:
+            lora_chat_tokenids: for LoRA
+            prefix_chat_tokenids: for PrefixEncoder
+                chat_tokenids (IChatTokenIDs): 
+                    An instance of IChatTokenIDs used for:
                     prompt_to: transforming prompt into input token IDs suitable for LLM chating.
                     to_completion: transforming generated chat rresponse_tokenids into completion.
         
-            lora_name (str): 
+            lora_or_prefix_name (str): 
                 The name of the LoRA Adapter enabled to be used for generating responses.
-
-            prefix_name (str):
+                 or
                 The name of the PrefixEncoder enabled to be used for generating responses.
         
             max_new_tokens (int): 
@@ -505,11 +530,100 @@ class CausalLMLoRAsInference:
             logits_processor (Optional[LogitsProcessorList]): 
                 An optional list of logits processors to apply to the logits before the softmax step, allowing for manipulation of the logits to control the generation process.
         """
+        # chat_tokenids selection
+        chat_tokenids = None
+        if lora_or_prefix_name in self.lora_name_dict:
+            self.model.set_adapter( # Sets a specific adapter by forcing the model to use a that adapter and disable the other adapters.
+                adapter_name = lora_or_prefix_name # The name of the adapter to set. Can be also a list of strings to set multiple adapters.
+                )
+            chat_tokenids = lora_chat_tokenids
+            logging.info(f"LoRA Adapter {lora_or_prefix_name} enabled.")
+        else:
+            if self.lora_name_dict:
+                # Disable all adapters that are attached to the model. This leads to inferring with the base model only.
+                self.model.disable_adapters()
+            logging.warn(f"{lora_or_prefix_name} not found in lora_name_dict. For LoRA, falling back to using the base model only.")
+
+        if hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'prefix_encoder'):
+            if lora_or_prefix_name in self.prefix_name_dict:
+                # Using .load_state_dict(prefix_dict) updates model parameters with values from prefix_dict,
+                # with matching keys dictating which parameters are updated. Subsequent calls with a new state dictionary
+                # will overwrite existing parameter values based on these keys.
+                #
+                # Caution:
+                # - Parameters not present in the new state dictionary but exist in the model retain their values,
+                #   potentially leading to "stale" data if not intentionally managed.
+                # - Keys in the new state dictionary that don't match any parameter name in the model are ignored when strict=False,
+                #   or raise an error if strict=True (default behavior), highlighting mismatches between the model and state dictionary.
+                try:
+                    self.model.transformer.prefix_encoder.load_state_dict(self.prefix_name_dict[lora_or_prefix_name][0])
+                except Exception as e:
+                    logging.error(f"Exception raise with self.model.transformer.prefix_encoder.load_state_dict( prefix_name_dict[][] ), error message is {e}")
+                    raise
+                chat_tokenids = prefix_chat_tokenids
+                logging.info(f"PrefixEncoder {lora_or_prefix_name} enabled.")
+            else:
+                try:
+                   self.model.transformer.prefix_encoder.load_state_dict(self.initial_prefix_state_dict)
+                except Exception as e:
+                    logging.error(f"Exception raise with self.model.transformer.prefix_encoder.load_state_dict( initial_prefix_state_dict ), error message is {e}")
+                logging.warn(f"PrefixEncoder {lora_or_prefix_name} not found in prefix_name_dict. For PrefixEncoder falling back to using the base model only.")
+        else:
+            logging.warn("The model does not have transformer and/or prefix_encoder attributes.")
+
+
+
+        # generate inputs making
+        input_ids = None
+        prompt_length = None
+        input_config = {}
+        device = next(self.model.parameters()).device
+        if chat_tokenids:
+            try:
+                prompt_inputs = chat_tokenids.prompt_to(self.tokenizer, prompt)
+                if isinstance(prompt_inputs, list):
+                    input_ids = torch.tensor([prompt_inputs], device = next(self.model.parameters()).device)
+                    prompt_length = len(prompt_inputs)
+                elif isinstance(prompt_inputs, BatchEncoding):
+                    raise NotImplementedError("Handling for BatchEncoding return type is not yet implemented.")
+                else:
+                    raise TypeError("Unexpected return type from prompt_to method")
+            except Exception as e:
+                logging.error(f"Exception raise with chat_tokenids.prompt_to(self.tokenizer, prompt), error message is {e}")
+                raise
+            logging.debug(f"prompt= {prompt_inputs} \ninput_ids= {input_ids}")
+        else:
+            # the return inputs is a dict like: {'input_ids': tensor([[64790, 64792, 24954]], device='cuda:0'),
+            #                                    'attention_mask': tensor([[1, 1, 1]], device='cuda:0'),
+            #                                    'position_ids': tensor([[0, 1, 2]], device='cuda:0')
+            #                                   }
+            inputs = self.tokenizer( #from transformers/src/transformers/tokenization_utils_base.py
+                                                 # class PreTrainedTokenizerBase::__call__( ... ) 
+                                                 #     Main method to tokenize and prepare for the model one or several sequence(s)
+                                                 #        or one or several pair(s) of sequences.
+                    # text (`str`, `List[str]`, `List[List[str]]`, *optional*): 
+                    text = prompt,               # The sequence or batch of sequences to be encoded.
+                    # text_pair (`str`, `List[str]`, `List[List[str]]`, *optional*):
+                    # text_target (`str`, `List[str]`, `List[List[str]]`, *optional*):
+                    # text_pair_target (`str`, `List[str]`, `List[List[str]]`, *optional*):
+                    return_tensors="pt"         #Return PyTorch `torch.Tensor` objects.
+                    )
+        
+            g_inputs = inputs.to(device)
+            attention_mask = g_inputs.get('attention_mask', None)
+            if attention_mask is not None:
+                input_config['attention_mask'] = attention_mask
+            position_ids = g_inputs.get('position_ids', None)
+            if position_ids is not None:
+                input_config['position_ids'] = position_ids
+            input_ids = g_inputs['input_ids']
+            logging.debug(f"prompt= {prompt} \ng_inputs={g_inputs} \ninput_ids= {input_ids}")
+
+
         gen_config_dict = kwargs.copy()
         gen_config_dict['max_new_tokens'] = max_new_tokens
         gen_config_dict['pad_token_id'] = self.tokenizer.pad_token_id
         gen_config_dict['eos_token_id'] = [self.tokenizer.eos_token_id] + self.tokenizer.additional_special_tokens_ids
-
         generation_config = GenerationConfig(                      # A large number of these flags control the logits or the stopping criteria of the generation.
                 **gen_config_dict                                  # Parameters that control the length of the output
                 # max_length (`int`, *optional*, defaults to 20): -> The maximum length the generated tokens can have.  
@@ -572,53 +686,52 @@ class CausalLMLoRAsInference:
                 # generation_kwargs: Additional generation kwargs will be forwarded to the `generate` function of the model.
                 )
         
-        if lora_name in self.lora_name_dict:
-            print(f"Adapter {lora_name} enabled.")
-            self.model.set_adapter( # Sets a specific adapter by forcing the model to use a that adapter and disable the other adapters.
-                adapter_name = lora_name # The name of the adapter to set. Can be also a list of strings to set multiple adapters.
-                )
-        else:
-            print(f"Adapter {lora_name} not found. Falling back to using the base model only.")
-            if self.lora_name_dict:
-                # Disable all adapters that are attached to the model. This leads to inferring with the base model only.
-                self.model.disable_adapters()
 
-        if hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'prefix_encoder'):
-            if prefix_name in self.prefix_name_dict:
-                # Using .load_state_dict(prefix_dict) updates model parameters with values from prefix_dict,
-                # with matching keys dictating which parameters are updated. Subsequent calls with a new state dictionary
-                # will overwrite existing parameter values based on these keys.
-                #
-                # Caution:
-                # - Parameters not present in the new state dictionary but exist in the model retain their values,
-                #   potentially leading to "stale" data if not intentionally managed.
-                # - Keys in the new state dictionary that don't match any parameter name in the model are ignored when strict=False,
-                #   or raise an error if strict=True (default behavior), highlighting mismatches between the model and state dictionary.
-                print(f"Prefix {prefix_name} enabled.")
-                self.model.transformer.prefix_encoder.load_state_dict(self.prefix_name_dict[prefix_name][0])
-            else:
-                print(f"Prefix {prefix_name} not found. Falling back to using the base model only.")
-                self.model.transformer.prefix_encoder.load_state_dict(self.initial_prefix_state_dict)
-        else:
-            print("The model does not have transformer and/or prefix_encoder attributes.")
 
-        prompt_ids = chat_tokenids.prompt_to(self.tokenizer, prompt)
-        prompt_length = len(prompt_ids)
-        input_ids = torch.tensor([prompt_ids], device = next(self.model.parameters()).device)
+
+
 
         try:
             generated_tokenids = self.model.generate(
                 input_ids = input_ids,
+                **input_config,
                 generation_config = generation_config,
                 logits_processor = logits_processor if logits_processor is not None else self.default_logits_processor,
                 )
+            logging.debug(f"generation_config= {generation_config}")
         except Exception as e:
-            print(f"Exception raise with self.model.generate( ... ), error message is {e}")
+            logging.error(f"Exception raise with self.model.generate( ... ), error message is {e}")
             raise
-        
-        response_tokenids = generated_tokenids[:, prompt_length:]
+       
+        # convert to completion text
+        completion = None
+        if chat_tokenids:
+            try:
+                if prompt_length is not None:
+                    response_tokenids = generated_tokenids[:, prompt_length:]
+                else:
+                    logging.error(f"prompt_length is None, the chat_tokenids.prompt_to() return value may not be a list")
+            except Exception as e:
+                logging.error(f"Exception raise with response_tokenids = generated_tokenids[:, prompt_length:], error message is {e}")
+                raise
+            try:
+                completion = chat_tokenids.to_completion(self.tokenizer, response_tokenids)
+            except Exception as e:
+                logging.error(f"Exception raise with chat_tokenids.to_completion(self.tokenizer, response_tokenids), error message is {e}")
+                raise
+        else:
+            try:
+                response_tokenids = generated_tokenids[0, input_ids.shape[-1]:]
+            except Exception as e:
+                logging.error(f"Exception raise with generated_tokenids[0, g_inputs['input_ids'].shape[-1]:], error message is {e}")
+                raise
+            try:
+                completion = self.tokenizer.decode(response_tokenids, skip_special_tokens=True)
+            except Exception as e:
+                logging.error(f"Exception raise with self.tokenizer.decode(response_tokenids, skip_special_tokens=True), error message is {e}")
+                raise
 
-        completion = chat_tokenids.to_completion(self.tokenizer, response_tokenids)
+        logging.debug(f"generated_tokenids= {generated_tokenids} \ncompletion= {completion}")
 
         return completion
 
