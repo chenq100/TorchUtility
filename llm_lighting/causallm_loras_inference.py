@@ -61,31 +61,6 @@ from transformers import (
                                   #     
     )
 
-from peft import (
-        LoraConfig,         # class LoraConfig(PeftConfig): Reference: peft/src/peft/tuners/lora/config.py
-                            # This is the configuration class to store the configuration of a [`LoraModel`], and inherits from PeftConfig,
-                            #     r (`int`): Lora attention dimension (the "rank"). 
-                            #     target_modules (`Optional[Union[List[str], str]]`): The names of the modules to apply the adapter to. 
-                            #     lora_alpha (`int`): The alpha parameter for Lora scaling.
-                            #     lora_dropout (`float`): The dropout probability for Lora layers.
-                            #     fan_in_fan_out (`bool`): Set this to True if the layer to replace stores weight like (fan_in, fan_out).
-                            #     bias (`str`): Bias type for LoRA: Can be 'none', 'all' or 'lora_only'. the corresponding biases will be updated during training.
-                            #     use_rslora (`bool`): Sets the adapter scaling factor to `lora_alpha/math.sqrt(r)`
-                            #     modules_to_save (`List[str]`): List of modules apart from adapter layers to be set as trainable and saved in the final checkpoint.
-                            #     init_lora_weights (`bool` | `Literal["gaussian", "loftq"]`): How to initialize the weights of the adapter layers. 
-                            #     layers_to_transform (`Union[List[int], int]`): The layer indices to transform, means that these layers will be embedded in the LoRA matrix.
-                            #     layers_pattern (`str`): The layer pattern name, used to further refine or specify the layers selected from layers_to_transform ?
-                            #     rank_pattern (`dict`): {"layer name": specific r-value} as opposed to uniform value: 'r'.
-                            #     alpha_pattern (`dict`): {"layer name": specific alpha-value} as opposed to uniform value: 'lora_alpha'.
-                            #     megatron_config (`Optional[dict]`): The TransformerConfig arguments for Megatron(Nvidia), used to create LoRA's parallel linear layer.
-                            #     megatron_core (`Optional[str]`): The core module from Megatron to use, defaults to `"megatron.core"`.
-                            #     loftq_config (`Optional[LoftQConfig]`): The configuration of LoftQ, will be used to quantize the backbone weights and initialize Lora layers.
-                            #         LoftQ introduces a novel quantization framework tailored for LoRA fine-tuning, 
-                            #         effectively bridging the gap between quantized and full-precision models by finding an optimal low-rank initialization, 
-                            #         thereby significantly enhancing model generalization and performance on downstream tasks.
-        TaskType
-        )
-
 from safetensors import (  # Simple, safe way to store and distribute tensors
         safe_open
         )
@@ -426,7 +401,7 @@ class CausalLMLoRAsInference:
                 The local path where the LoRA adapter exists.
             lora_name (`str`):
                 The name of the loaded lora adapter, used as the label to select this LoRA adapter.
-            mode_name (str):
+            model_name (str):
                 Use as a key in the loraconfig dictionary to search for the LoraConfig, that a derived class of peft.PeftConfig.
         """
         if lora_name not in self.lora_name_dict:
