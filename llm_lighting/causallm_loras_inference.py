@@ -15,6 +15,18 @@ from transformers import (
     BitsAndBytesConfig,           # This is a wrapper class about all possible attributes and features
                                   #     that you can play with a model that has been loaded using bitsandbytes. 
                                   #
+    QuantoConfig,                 # This is a wrapper class about all possible attributes and features that you can play with a model that has been loaded using `quanto`.
+                                  # class QuantoConfig(QuantizationConfigMixin):
+                                  #     Args:
+                                  #        weights (`str`, *optional*, defaults to `"int8"`):
+                                  #            The target dtype for the weights after quantization. Supported values are ("float8","int8","int4","int2")
+                                  #        activations (`str`, *optional*):
+                                  #            The target dtype for the activations after quantization. Supported values are (None,"int8","float8")
+                                  #        modules_to_not_convert (`list`, *optional*, default to `None`):
+                                  #            The list of modules to not quantize, useful for quantizing models that explicitly require to have
+                                  #            some modules left in their original precision (e.g. Whisper encoder, Llava encoder, Mixtral gate layers).
+                                  #
+                                  #
     LogitsProcessorList,          # transformers/src/transformers/generation/logits_process.py
                                   #   Create a list of [`LogitsProcessor`] or [`LogitsWarper`] to subsequently process a `scores` input tensor,
                                   #     the 'scores' tensor represents the model's output predictions for each possible next token, based on the input sequence,
@@ -241,16 +253,27 @@ class CausalLMLoRAsInference:
         if self.device_map.type not in ["cpu", "cuda"]:
             raise ValueError(f"Unsupported device_map: {self.device_map}. Only 'cpu' and 'cuda' are supported.")
 
-        self.bnb_config_list =  [None] * 8
+        self.quantization_config_list =  [None] * 8
+        # 2Bits
+        if self.q_bits == 2:
+            quanto_config = QuantoConfig(weights="int2")
+            self.quantization_config_list[2] = quanto_config
+            logging.info("2Bits quantization")
         # 4Bits
-        if self.q_bits == 4:
-            bnb_config_nf4 = BitsAndBytesConfig(                  # https://huggingface.co/docs/transformers/main_classes/quantization#transformers.BitsAndBytesConfig
+        elif self.q_bits == 4:
+            if self.device_map.type == "cuda":
+                bnb_config_nf4 = BitsAndBytesConfig(          # https://huggingface.co/docs/transformers/main_classes/quantization#transformers.BitsAndBytesConfig
                         load_in_4bit=True,                    # enable 4-bit quantization by replacing the Linear layers with FP4/NF4 layers from bitsandbytes
                         bnb_4bit_quant_type="nf4",            # sets the quantization data type in the bnb.nn.Linear4Bit layers
                         bnb_4bit_use_double_quant=True,       # used for nested quantization where the quantization constants from the first quantization are quantized again
                         bnb_4bit_compute_dtype=torch.bfloat16 # sets the computational type which might be different than the input time
                         )
-            self.bnb_config_list[4] = bnb_config_nf4
+                self.quantization_config_list[4] = bnb_config_nf4
+                logging.info("4Bits quantization for cuda")
+            else:
+                quanto_config = QuantoConfig(weights="int4")
+                self.quantization_config_list[4] = quanto_config
+                logging.info("4Bits quantization")
         # 8Bits
         elif self.q_bits == 8:
             raise ValueError(f"Unsupported q_bits: {self.q_bits}.")
@@ -330,7 +353,7 @@ class CausalLMLoRAsInference:
                 # load_in_8bit = kwargs.pop("load_in_8bit", False)
                 # load_in_4bit = kwargs.pop("load_in_4bit", False)              -> used to enable 4-bit quantization by replacing the Linear layers with FP4/NF4 layers from bitsandbytes
                 # quantization_config = kwargs.pop("quantization_config", None)
-                quantization_config = self.bnb_config_list[self.q_bits] if self.q_bits is not None else None,
+                quantization_config = self.quantization_config_list[self.q_bits] if self.q_bits is not None else None,
                 # subfolder = kwargs.pop("subfolder", "")
                 # commit_hash = kwargs.pop("_commit_hash", None)
                 # variant = kwargs.pop("variant", None)
@@ -692,12 +715,14 @@ class CausalLMLoRAsInference:
 
 
         try:
-            generated_tokenids = self.model.generate(
-                input_ids = input_ids,
-                **input_config,
-                generation_config = generation_config,
-                logits_processor = logits_processor if logits_processor is not None else self.default_logits_processor,
-                )
+            self.model.eval()   # setting evaluation-mode
+            with torch.inference_mode(False):   # Temporarily disable inference mode
+                generated_tokenids = self.model.generate(
+                    input_ids = input_ids,
+                    **input_config,
+                    generation_config = generation_config,
+                    logits_processor = logits_processor if logits_processor is not None else self.default_logits_processor,
+                    )
             logging.debug(f"generation_config= {generation_config}")
         except Exception as e:
             logging.error(f"Exception raise with self.model.generate( ... ), error message is {e}")
