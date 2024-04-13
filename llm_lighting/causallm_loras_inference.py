@@ -16,6 +16,7 @@ from transformers import (
                                   #     that you can play with a model that has been loaded using bitsandbytes. 
                                   #
     QuantoConfig,                 # This is a wrapper class about all possible attributes and features that you can play with a model that has been loaded using `quanto`.
+                                  # transformers-4.39.3/src/transformers/utils/quantization_config.py
                                   # class QuantoConfig(QuantizationConfigMixin):
                                   #     Args:
                                   #        weights (`str`, *optional*, defaults to `"int8"`):
@@ -26,6 +27,20 @@ from transformers import (
                                   #            The list of modules to not quantize, useful for quantizing models that explicitly require to have
                                   #            some modules left in their original precision (e.g. Whisper encoder, Llava encoder, Mixtral gate layers).
                                   #
+    GPTQConfig,                   # This is a wrapper class about all possible attributes and features that you can play with a model that has been 
+                                  #     loaded using `optimum` api for gptq quantization relying on auto_gptq backend.
+                                  # transformers-4.39.3/src/transformers/utils/quantization_config.py
+                                  #     class GPTQConfig(QuantizationConfigMixin):
+                                  #          Args:
+                                  #              bits (`int`):
+                                  #                The number of bits to quantize to, supported numbers are (2, 3, 4, 8).
+                                  #              tokenizer (`str` or `PreTrainedTokenizerBase`, *optional*):
+                                  #                The tokenizer used to process the dataset. You can pass either:
+                                  #                  - A custom tokenizer object.
+                                  #                  - A string, the *model id* of a predefined tokenizer hosted inside a model repo on huggingface.co.
+                                  #                  - A path to a *directory* containing vocabulary files required by the tokenizer, for instance saved
+                                  #                    using the [`~PreTrainedTokenizer.save_pretrained`] method, e.g., `./my_model_directory/`.
+                                  #              ...
                                   #
     LogitsProcessorList,          # transformers/src/transformers/generation/logits_process.py
                                   #   Create a list of [`LogitsProcessor`] or [`LogitsWarper`] to subsequently process a `scores` input tensor,
@@ -221,19 +236,24 @@ class CausalLMLoRAsInference:
         self.q_bits = q_bits
         
         if device_map == "auto":
-            self.device_map = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            #self.device_map = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.device_map = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
         else:
             self.device_map = torch.device(device_map)
         logging.info(f"arg device_map is {device_map} ==> {self.device_map}")
-        if self.device_map.type not in ["cpu", "cuda"]:
-            raise ValueError(f"Unsupported device_map: {self.device_map}. Only 'cpu' and 'cuda' are supported.")
+        if self.device_map.type not in ["cpu", "cuda", "mps"]:
+            raise ValueError(f"Unsupported device_map: {self.device_map}. Only 'cpu' and 'cuda' and 'mps' are supported.")
 
         self.quantization_config_list =  [None] * 8
         # 2Bits
         if self.q_bits == 2:
             quanto_config = QuantoConfig(weights="int2")
             self.quantization_config_list[2] = quanto_config
-            logging.info("2Bits quantization")
+            logging.info("2Bits quantization by Quanto")
+        elif self.q_bits == 3:
+            gptq_config = GPTQConfig(bits = 3)
+            self.quantization_config_list[3] = gptq_config
+            logging.info("3Bits quantization by GPTQ")
         # 4Bits
         elif self.q_bits == 4:
             if self.device_map.type == "cuda":
@@ -244,11 +264,11 @@ class CausalLMLoRAsInference:
                         bnb_4bit_compute_dtype=torch.bfloat16 # sets the computational type which might be different than the input time
                         )
                 self.quantization_config_list[4] = bnb_config_nf4
-                logging.info("4Bits quantization for cuda")
+                logging.info("4Bits quantization by BNB")
             else:
                 quanto_config = QuantoConfig(weights="int4")
                 self.quantization_config_list[4] = quanto_config
-                logging.info("4Bits quantization")
+                logging.info("4Bits quantization by Quanto")
         # 8Bits
         elif self.q_bits == 8:
             raise ValueError(f"Unsupported q_bits: {self.q_bits}.")

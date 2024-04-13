@@ -11,3 +11,5 @@ bitsandbytes
 
 quanto
 transformers==4.39.3
+
+datasets
