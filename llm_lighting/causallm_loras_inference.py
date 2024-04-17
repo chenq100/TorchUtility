@@ -144,7 +144,6 @@ class IChatTokenIDs(ABC):
         """
         self.config = config
 
-    @abstractmethod
     def prompt_to(self, tokenizer: PreTrainedTokenizer, prompt: str) -> Union[List[int], BatchEncoding]:
         """
         Transform a text prompt into a list of token IDs suitable for LLM processing, using the provided tokenizer and current configuration settings.
@@ -162,7 +161,6 @@ class IChatTokenIDs(ABC):
         """
         pass
 
-    @abstractmethod
     def to_completion(self, tokenizer: PreTrainedTokenizer, response_tokenids: List[int]) -> str:
         """
         Transform a list of response token IDs back into human-readable text (completion) using the provided tokenizer and current configuration settings.
@@ -181,6 +179,8 @@ class IChatTokenIDs(ABC):
 
 
 class CausalLMLoRAsInference:
+    _logger = None
+
     @staticmethod
     def logging_setup(log_level = None, log_file: Union[str, Path] = None):
         print(f"#########logging_setup {log_level} {log_file}############")
@@ -217,11 +217,30 @@ class CausalLMLoRAsInference:
             log2 = f"log2console and log2file:{log_file}"
 
         logger.info("logging_setup succ: {log_level} and {log2}")
+        CausalLMLoRAsInference._logger = logger
 
-    def __init__(self, model_path, model_name, log_level = None, log_file = None, q_bits: int = None, device_map = "auto", runtime_model_dtype = torch.float32, prefix_seq_len = None):
+
+    def __init__(self, model_path, model_name, log_level = None, log_file = None, 
+            device_map = "auto", 
+            torch_dtype = None, 
+            q_bits: int = None, 
+            runtime_model_dtype = torch.float32, 
+            prefix_seq_len = None, 
+            ):
         """
         Args:
+            device_map:
+                str: auto\cuda\mps\cpu
+                dict: { model_module_name1: 0, model_module_name2: 1, ... }
+
+            torch_dtype( (`str` or `torch.dtype` or None): Override the default `torch.dtype` and load the model under a specific `dtype`.
+                torch.float16 or torch.bfloat16 or torch.float
+                "auto": `torch_dtype` entry in the `config.json` > the first weight of a floating point type in the checkpoint > 
+            
+            if torch_dtype is not None, then q_bits will be ignored.
+            
             q_bits (int): An integer specifying the number of bits used for quantization, must be within the range of 1 to 8.
+            
             runtime_model_dtype: Specifies the data type of the model parameters at runtime, especially on CPU,
                 Essential for ensuring compatibility across different environments, as some CPUs may 
                   not support certain data types (e.g., float16), potentially leading to runtime errors,
@@ -231,19 +250,22 @@ class CausalLMLoRAsInference:
 
         self.model_name = model_name
 
+        if isinstance(device_map, dict):
+            self.device_map = device_map
+            self.device_type = "cuda"
+        else:
+            if device_map == "auto":
+                self.device_map = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
+            else:
+                self.device_map = torch.device(device_map)
+            self.device_type = self.device_map.type
+        logging.info(f"arg device_map is {device_map} ==> {self.device_type}")
+        if self.device_type not in ["cpu", "cuda", "mps"]:
+            raise ValueError(f"Unsupported device_type: {self.device_type}. Only 'cpu' and 'cuda' and 'mps' are supported.")
+
         if q_bits is not None and (q_bits < 0 or q_bits > 8):
             raise ValueError(f"Unsupported value for q_bits: {q_bits}. The number of quantization bits (q_bits) must be between 1 and 8, inclusive.")
         self.q_bits = q_bits
-        
-        if device_map == "auto":
-            #self.device_map = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.device_map = torch.device("mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu"))
-        else:
-            self.device_map = torch.device(device_map)
-        logging.info(f"arg device_map is {device_map} ==> {self.device_map}")
-        if self.device_map.type not in ["cpu", "cuda", "mps"]:
-            raise ValueError(f"Unsupported device_map: {self.device_map}. Only 'cpu' and 'cuda' and 'mps' are supported.")
-
         self.quantization_config_list =  [None] * 8
         # 2Bits
         if self.q_bits == 2:
@@ -256,7 +278,7 @@ class CausalLMLoRAsInference:
             logging.info("3Bits quantization by GPTQ")
         # 4Bits
         elif self.q_bits == 4:
-            if self.device_map.type == "cuda":
+            if self.device_type == "cuda":
                 bnb_config_nf4 = BitsAndBytesConfig(          # https://huggingface.co/docs/transformers/main_classes/quantization#transformers.BitsAndBytesConfig
                         load_in_4bit=True,                    # enable 4-bit quantization by replacing the Linear layers with FP4/NF4 layers from bitsandbytes
                         bnb_4bit_quant_type="nf4",            # sets the quantization data type in the bnb.nn.Linear4Bit layers
@@ -304,6 +326,13 @@ class CausalLMLoRAsInference:
             #         ...
             model_config.pre_seq_len = prefix_seq_len
 
+        model_from_pretrained_args = {}
+        model_from_pretrained_args['device_map'] = self.device_map
+        if torch_dtype is not None:
+            model_from_pretrained_args['torch_dtype'] = torch_dtype
+        else:
+            model_from_pretrained_args['quantization_config'] = self.quantization_config_list[self.q_bits] if self.q_bits is not None else None
+            logging.debug(f"quantization_config= {model_from_pretrained_args['quantization_config']}")
 
         # PreTrainedModel -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/modeling_utils.py#L1127
         # _BaseAutoModelClass -> https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/models/auto/auto_factory.py#L400
@@ -341,21 +370,23 @@ class CausalLMLoRAsInference:
                 # torch_dtype = kwargs.pop("torch_dtype", None)
                 # low_cpu_mem_usage = kwargs.pop("low_cpu_mem_usage", None)
                 # device_map = kwargs.pop("device_map", None)
-                device_map = self.device_map,
                 # max_memory = kwargs.pop("max_memory", None)
                 # offload_folder = kwargs.pop("offload_folder", None)
                 # offload_state_dict = kwargs.pop("offload_state_dict", False)
                 # load_in_8bit = kwargs.pop("load_in_8bit", False)
                 # load_in_4bit = kwargs.pop("load_in_4bit", False)              -> used to enable 4-bit quantization by replacing the Linear layers with FP4/NF4 layers from bitsandbytes
                 # quantization_config = kwargs.pop("quantization_config", None)
-                quantization_config = self.quantization_config_list[self.q_bits] if self.q_bits is not None else None,
                 # subfolder = kwargs.pop("subfolder", "")
                 # commit_hash = kwargs.pop("_commit_hash", None)
                 # variant = kwargs.pop("variant", None)
                 # adapter_kwargs = kwargs.pop("adapter_kwargs", {})
                 # adapter_name = kwargs.pop("adapter_name", "default")
                 # use_flash_attention_2 = kwargs.pop("use_flash_attention_2", False)
+                **model_from_pretrained_args
                 )
+
+        self.model_modules_name()
+
 
         # Convert the loaded model to float32 to ensure compatibility with CPU operations, avoiding 'Half' data type errors
         #   ==> RuntimeError: "addmm_impl_cpu_" not implemented for 'Half'
@@ -413,7 +444,19 @@ class CausalLMLoRAsInference:
 
         #transformers/src/transformers/generation/logits_process.py
         self.default_logits_processor = LogitsProcessorList().append(InfNanRemoveLogitsProcessor())
-    
+
+
+    def model_arch_info(self, model, max_depth=1, depth=0):
+        if depth > max_depth:
+            return
+        for name, child in model.named_children():
+            logging.debug('  ' * depth + f"{name} ({child.__class__.__name__})")
+            self.model_arch_info(child, max_depth, depth + 1)
+
+    def model_modules_name(self, ):
+        for name, module in self.model.named_modules():
+            logging.debug(f"name= {name}")
+
     def load_lora(self, lora_path: str, lora_name: str, model_name: str) -> None:
         """
         Args:
@@ -596,7 +639,8 @@ class CausalLMLoRAsInference:
         prompt_length = None
         input_config = {}
         device = next(self.model.parameters()).device
-        if chat_tokenids:
+        if chat_tokenids and chat_tokenids.prompt_to is not IChatTokenIDs.prompt_to:
+            #
             try:
                 prompt_inputs = chat_tokenids.prompt_to(self.tokenizer, prompt)
                 if isinstance(prompt_inputs, list):
@@ -725,7 +769,7 @@ class CausalLMLoRAsInference:
        
         # convert to completion text
         completion = None
-        if chat_tokenids:
+        if chat_tokenids and chat_tokenids.to_completion is not IChatTokenIDs.to_completion:
             try:
                 if prompt_length is not None:
                     response_tokenids = generated_tokenids[:, prompt_length:]
